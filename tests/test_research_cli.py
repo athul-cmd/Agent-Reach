@@ -8,15 +8,26 @@ import json
 from datetime import timedelta
 
 from agent_reach.research.cli import _handle_run
-from agent_reach.research.models import JobRun, JobStatus, JobType, utc_now
+from agent_reach.research.models import JobRun, JobStatus, JobType, RefreshRequest, RefreshRequestStatus, utc_now
 
 
 class _FakeStore:
     def __init__(self, jobs: list[JobRun]):
         self.jobs = {job.id: job for job in jobs}
+        self.refresh_requests = {
+            job.refresh_request_id: RefreshRequest(
+                id=job.refresh_request_id,
+                research_profile_id=job.research_profile_id,
+                trigger="manual_full_refresh",
+                status=RefreshRequestStatus.PENDING,
+            )
+            for job in jobs
+            if job.refresh_request_id
+        }
         self.completed: list[str] = []
         self.failed: list[tuple[str, str]] = []
         self.claim_calls: list[dict[str, object]] = []
+        self.refresh_updates: list[dict[str, object]] = []
 
     def get_job(self, job_id: str):
         return self.jobs.get(job_id)
@@ -32,16 +43,25 @@ class _FakeStore:
         )
         return list(self.jobs.values())[:limit]
 
-    def complete_job(self, job_id: str, finished_at):
+    def complete_job(self, job_id: str, finished_at, **_kwargs):
         self.completed.append(job_id)
         self.jobs[job_id].status = JobStatus.SUCCEEDED
         self.jobs[job_id].finished_at = finished_at
 
-    def fail_job(self, job_id: str, finished_at, error_summary: str):
+    def fail_job(self, job_id: str, finished_at, error_summary: str, **_kwargs):
         self.failed.append((job_id, error_summary))
         self.jobs[job_id].status = JobStatus.FAILED
         self.jobs[job_id].finished_at = finished_at
         self.jobs[job_id].error_summary = error_summary
+
+    def get_refresh_request(self, refresh_request_id: str):
+        return self.refresh_requests.get(refresh_request_id)
+
+    def list_jobs_for_refresh(self, refresh_request_id: str):
+        return [job for job in self.jobs.values() if job.refresh_request_id == refresh_request_id]
+
+    def update_refresh_request(self, refresh_request_id: str, **kwargs):
+        self.refresh_updates.append({"refresh_request_id": refresh_request_id, **kwargs})
 
 
 class _FakeWorker:
@@ -49,7 +69,7 @@ class _FakeWorker:
         self.fail_types = fail_types or set()
         self.calls: list[tuple[JobType, str]] = []
 
-    def run_job(self, job_type: JobType, profile_id: str):
+    def run_job(self, job_type: JobType, profile_id: str, **_kwargs):
         self.calls.append((job_type, profile_id))
         if job_type in self.fail_types:
             raise RuntimeError(f"boom:{job_type.value}")

@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto"
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import type {
   CreatorWatchPayload,
+  JobRunEventPayload,
   JobRunPayload,
+  RefreshRequestPayload,
   ResearchDashboardData,
   ResearchProfileInput,
   ResearchProfilePayload,
@@ -143,13 +145,20 @@ type WeeklyReportRow = {
 type JobRunRow = {
   id: string
   research_profile_id: string
+  refresh_request_id: string
   job_type: JobType
   status: JobStatus
   scheduled_for: string
+  depends_on_job_run_id: string
   started_at: string | null
   finished_at: string | null
   attempt_count: number
   input_snapshot: Record<string, unknown> | null
+  output_snapshot: Record<string, unknown> | null
+  current_step: string | null
+  current_source: string | null
+  progress_current: number | null
+  progress_total: number | null
   error_summary: string
   next_run_at: string | null
   heartbeat_at: string | null
@@ -157,6 +166,37 @@ type JobRunRow = {
   lease_owner: string
   lease_expires_at: string | null
   dispatched_at: string | null
+}
+
+type RefreshRequestStatus = "pending" | "running" | "succeeded" | "partial" | "failed"
+
+type RefreshRequestRow = {
+  id: string
+  research_profile_id: string
+  trigger: string
+  status: RefreshRequestStatus
+  query_snapshot: Record<string, unknown> | null
+  latest_stage: string
+  summary: string
+  source_status: Record<string, unknown> | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+type JobRunEventRow = {
+  id: string
+  job_run_id: string
+  refresh_request_id: string
+  level: string
+  message: string
+  step: string
+  source: string
+  progress_current: number | null
+  progress_total: number | null
+  event_payload: Record<string, unknown> | null
+  created_at: string
 }
 
 const COLLECTION_INTERVAL_MS = 4 * 60 * 60 * 1000
@@ -171,6 +211,14 @@ const RESEARCH_JOB_TYPES: JobType[] = [
   "rank_topics",
   "generate_ideas",
   "publish_weekly_digest",
+]
+const CORE_REFRESH_JOB_TYPES: JobType[] = [
+  "collect_sources",
+  "discover_creators",
+  "refresh_style_profile",
+  "cluster_items",
+  "rank_topics",
+  "generate_ideas",
 ]
 
 function supabaseServiceRoleKey(): string {
@@ -235,6 +283,50 @@ function asScoreMap(value: unknown): Record<string, number> {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [key, Number(item) || 0]),
   )
+}
+
+function asObjectMap(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return { ...(value as Record<string, unknown>) }
+}
+
+function buildQuerySnapshot(profile: ResearchProfileRow): Record<string, unknown> {
+  const seeds = [
+    ...asStringArray(profile.must_track_topics),
+    profile.niche_definition,
+    profile.target_audience && profile.niche_definition
+      ? `${profile.niche_definition} for ${profile.target_audience}`
+      : "",
+    profile.persona_brief && profile.niche_definition
+      ? `${profile.persona_brief} ${profile.niche_definition}`
+      : "",
+  ]
+  const desiredFormats = asStringArray(profile.desired_formats)
+  if (desiredFormats.length) {
+    seeds.push(`${profile.niche_definition} ${desiredFormats.join(", ")}`.trim())
+  }
+
+  const queries: string[] = []
+  const seen = new Set<string>()
+  for (const seed of seeds) {
+    const compact = String(seed || "").trim().replace(/\s+/g, " ")
+    if (!compact) continue
+    const lowered = compact.toLowerCase()
+    if (seen.has(lowered)) continue
+    seen.add(lowered)
+    queries.push(compact)
+  }
+
+  return {
+    queries: queries.slice(0, 4).length ? queries.slice(0, 4) : ["content strategy"],
+    inputs: {
+      must_track_topics: asStringArray(profile.must_track_topics),
+      niche_definition: profile.niche_definition,
+      target_audience: profile.target_audience,
+      persona_brief: profile.persona_brief,
+      desired_formats: desiredFormats,
+    },
+  }
 }
 
 function profilePayload(row: ResearchProfileRow | null): ResearchProfilePayload | null {
@@ -356,16 +448,57 @@ function jobPayload(row: JobRunRow): JobRunPayload {
   return {
     id: row.id,
     research_profile_id: row.research_profile_id,
+    refresh_request_id: row.refresh_request_id || "",
     job_type: row.job_type,
     status: row.status,
     scheduled_for: row.scheduled_for,
+    depends_on_job_run_id: row.depends_on_job_run_id || "",
     started_at: row.started_at,
     finished_at: row.finished_at,
     attempt_count: Number(row.attempt_count) || 0,
     input_snapshot: row.input_snapshot || {},
+    output_snapshot: row.output_snapshot || {},
+    current_step: row.current_step || "",
+    current_source: row.current_source || "",
+    progress_current: Number(row.progress_current) || 0,
+    progress_total: Number(row.progress_total) || 0,
     error_summary: row.error_summary || "",
     next_run_at: row.next_run_at,
     heartbeat_at: row.heartbeat_at,
+  }
+}
+
+function refreshRequestPayload(row: RefreshRequestRow | null): RefreshRequestPayload | null {
+  if (!row) return null
+  return {
+    id: row.id,
+    research_profile_id: row.research_profile_id,
+    trigger: row.trigger,
+    status: row.status,
+    query_snapshot: asObjectMap(row.query_snapshot),
+    latest_stage: row.latest_stage || "",
+    summary: row.summary || "",
+    source_status: asObjectMap(row.source_status),
+    started_at: row.started_at,
+    finished_at: row.finished_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }
+}
+
+function jobRunEventPayload(row: JobRunEventRow): JobRunEventPayload {
+  return {
+    id: row.id,
+    job_run_id: row.job_run_id,
+    refresh_request_id: row.refresh_request_id || "",
+    level: row.level,
+    message: row.message,
+    step: row.step || "",
+    source: row.source || "",
+    progress_current: Number(row.progress_current) || 0,
+    progress_total: Number(row.progress_total) || 0,
+    event_payload: asObjectMap(row.event_payload),
+    created_at: row.created_at,
   }
 }
 
@@ -479,6 +612,9 @@ function emptyDashboard(error: string | null): ResearchDashboardData {
     clusters: [],
     ideas: [],
     creators: [],
+    active_refresh: null,
+    refresh_jobs: [],
+    job_events: [],
     jobs: [],
     metrics: {
       source_item_count: 0,
@@ -525,6 +661,25 @@ function requireProfile(
   }
 }
 
+function stageLabel(jobType: JobType): string {
+  switch (jobType) {
+    case "collect_sources":
+      return "Collecting sources"
+    case "discover_creators":
+      return "Discovering creators"
+    case "refresh_style_profile":
+      return "Refreshing style"
+    case "cluster_items":
+      return "Clustering"
+    case "rank_topics":
+      return "Ranking"
+    case "generate_ideas":
+      return "Generating ideas"
+    case "publish_weekly_digest":
+      return "Publishing digest"
+  }
+}
+
 export async function loadResearchDashboardServer(): Promise<ResearchDashboardData> {
   try {
     await requireResearchUser()
@@ -539,7 +694,16 @@ export async function loadResearchDashboardServer(): Promise<ResearchDashboardDa
       }
     }
 
-    const [styleProfileResult, reportResult, sourceItemsResult, clustersResult, ideasResult, creatorsResult, jobsResult] =
+    const [
+      styleProfileResult,
+      reportResult,
+      sourceItemsResult,
+      clustersResult,
+      ideasResult,
+      creatorsResult,
+      jobsResult,
+      refreshRequestResult,
+    ] =
       await Promise.all([
         admin
           .from("style_profiles")
@@ -588,6 +752,13 @@ export async function loadResearchDashboardServer(): Promise<ResearchDashboardDa
           .eq("research_profile_id", profile.id)
           .order("scheduled_for", { ascending: false })
           .limit(12),
+        admin
+          .from("refresh_requests")
+          .select("*")
+          .eq("research_profile_id", profile.id)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ])
 
     for (const result of [
@@ -598,17 +769,43 @@ export async function loadResearchDashboardServer(): Promise<ResearchDashboardDa
       ideasResult,
       creatorsResult,
       jobsResult,
+      refreshRequestResult,
     ]) {
       if (result.error) {
         throw new Error(result.error.message)
       }
     }
 
+    const activeRefresh = (refreshRequestResult.data as RefreshRequestRow | null) || null
+    const [refreshJobsResult, jobEventsResult] = activeRefresh
+      ? await Promise.all([
+          admin
+            .from("job_runs")
+            .select("*")
+            .eq("refresh_request_id", activeRefresh.id)
+            .order("scheduled_for", { ascending: true })
+            .limit(12),
+          admin
+            .from("job_run_events")
+            .select("*")
+            .eq("refresh_request_id", activeRefresh.id)
+            .order("created_at", { ascending: false })
+            .limit(25),
+        ])
+      : [
+          { data: [], error: null },
+          { data: [], error: null },
+        ]
+    if (refreshJobsResult.error) throw new Error(refreshJobsResult.error.message)
+    if (jobEventsResult.error) throw new Error(jobEventsResult.error.message)
+
     const sourceItems = ((sourceItemsResult.data || []) as SourceItemRow[]).map(sourceItemPayload)
     const clusters = ((clustersResult.data || []) as TopicClusterRow[]).map(clusterPayload)
     const ideas = ((ideasResult.data || []) as IdeaCardRow[]).map(ideaPayload)
     const creators = ((creatorsResult.data || []) as CreatorWatchRow[]).map(creatorPayload)
     const jobs = ((jobsResult.data || []) as JobRunRow[]).map(jobPayload)
+    const refreshJobs = ((refreshJobsResult.data || []) as JobRunRow[]).map(jobPayload)
+    const jobEvents = ((jobEventsResult.data || []) as JobRunEventRow[]).map(jobRunEventPayload)
     const sourceHealth = buildSourceHealth(sourceItems)
 
     return {
@@ -624,6 +821,9 @@ export async function loadResearchDashboardServer(): Promise<ResearchDashboardDa
       clusters,
       ideas,
       creators,
+      active_refresh: refreshRequestPayload(activeRefresh),
+      refresh_jobs: refreshJobs,
+      job_events: jobEvents,
       jobs,
       metrics: {
         source_item_count: sourceItems.length,
@@ -1068,18 +1268,9 @@ export async function queueManualRunServer(payload: { profile_id?: string; job: 
   const admin = createResearchAdminClient()
   const profile = await resolveProfile(admin, payload.profile_id)
   requireProfile(profile)
-  const nowDate = new Date()
-  const now = nowDate.toISOString()
   const requestedTypes =
     payload.job === "all"
-      ? [
-          "collect_sources",
-          "discover_creators",
-          "refresh_style_profile",
-          "cluster_items",
-          "rank_topics",
-          "generate_ideas",
-        ]
+      ? CORE_REFRESH_JOB_TYPES
       : [payload.job]
   const validJobTypes = requestedTypes.filter((job): job is JobType =>
     RESEARCH_JOB_TYPES.includes(job as JobType),
@@ -1087,61 +1278,79 @@ export async function queueManualRunServer(payload: { profile_id?: string; job: 
   if (!validJobTypes.length) {
     throw new Error("Unknown manual job.")
   }
-  const openJobsResult = await admin
-    .from("job_runs")
-    .select("id, job_type, status, scheduled_for")
+  const activeRefreshResult = await admin
+    .from("refresh_requests")
+    .select("*")
     .eq("research_profile_id", profile.id)
     .in("status", ["pending", "running"])
-  if (openJobsResult.error) throw new Error(openJobsResult.error.message)
-  const openJobs = (openJobsResult.data || []) as Array<{
-    id: string
-    job_type: JobType
-    status: JobStatus
-    scheduled_for: string
-  }>
-  const openJobsByType = new Map(openJobs.map((job) => [job.job_type, job]))
-  const immediateJobTypes = new Set<JobType>()
-  const rescheduledJobIds: string[] = []
-
-  for (const jobType of validJobTypes) {
-    const existing = openJobsByType.get(jobType)
-    if (!existing) continue
-    if (existing.status === "running") {
-      immediateJobTypes.add(jobType)
-      continue
-    }
-    if (Date.parse(existing.scheduled_for) <= nowDate.getTime()) {
-      immediateJobTypes.add(jobType)
-      continue
-    }
-    const { error: updateError } = await admin
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (activeRefreshResult.error) throw new Error(activeRefreshResult.error.message)
+  const existingRefresh = (activeRefreshResult.data as RefreshRequestRow | null) || null
+  if (existingRefresh) {
+    const refreshJobsResult = await admin
       .from("job_runs")
-      .update({
-        scheduled_for: now,
-        lease_token: "",
-        lease_owner: "",
-        lease_expires_at: null,
-        dispatched_at: null,
-      })
-      .eq("id", existing.id)
-      .eq("status", "pending")
-    if (updateError) throw new Error(updateError.message)
-    immediateJobTypes.add(jobType)
-    rescheduledJobIds.push(existing.id)
+      .select("*")
+      .eq("refresh_request_id", existingRefresh.id)
+      .order("scheduled_for", { ascending: true })
+    if (refreshJobsResult.error) throw new Error(refreshJobsResult.error.message)
+    const childJobs = ((refreshJobsResult.data || []) as JobRunRow[]).map(jobPayload)
+    return {
+      ok: true,
+      refresh_request_id: existingRefresh.id,
+      status: existingRefresh.status,
+      created: false,
+      stage: existingRefresh.latest_stage || stageLabel(validJobTypes[0]),
+      summary: existingRefresh.summary || "A refresh is already in progress.",
+      child_jobs: childJobs,
+      dispatch: { claimed: 0, dispatched: 0, released: 0, seeded: 0, jobs: [] as string[] },
+    }
   }
 
-  const inserts = validJobTypes
-    .filter((job) => !openJobsByType.has(job))
-    .map((jobType) => ({
-      id: `job_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+  const now = nowIso()
+  const querySnapshot = buildQuerySnapshot(profile)
+  const refreshRequestId = `refresh_${randomUUID().replace(/-/g, "").slice(0, 12)}`
+  const refreshInsert = {
+    id: refreshRequestId,
+    research_profile_id: profile.id,
+    trigger: payload.job === "all" ? "manual_full_refresh" : `manual_${payload.job}`,
+    status: "pending",
+    query_snapshot: querySnapshot,
+    latest_stage: stageLabel(validJobTypes[0]),
+    summary: `Queued ${validJobTypes.length} pipeline stage${validJobTypes.length === 1 ? "" : "s"}.`,
+    source_status: {},
+    started_at: null,
+    finished_at: null,
+    created_at: now,
+    updated_at: now,
+  }
+  const childJobs = validJobTypes.map((jobType, index) => {
+    const id = `job_${randomUUID().replace(/-/g, "").slice(0, 12)}`
+    return {
+      id,
       research_profile_id: profile.id,
+      refresh_request_id: refreshRequestId,
       job_type: jobType,
       status: "pending",
       scheduled_for: now,
+      depends_on_job_run_id: index > 0 ? "" : "",
       started_at: null,
       finished_at: null,
       attempt_count: 0,
-      input_snapshot: { trigger: "manual" },
+      input_snapshot: {
+        trigger: "manual",
+        refresh_request_id: refreshRequestId,
+        query_snapshot: querySnapshot,
+        requested_job: payload.job,
+        pipeline_index: index + 1,
+        pipeline_total: validJobTypes.length,
+      },
+      output_snapshot: {},
+      current_step: "",
+      current_source: "",
+      progress_current: 0,
+      progress_total: 0,
       error_summary: "",
       next_run_at: null,
       heartbeat_at: null,
@@ -1149,17 +1358,25 @@ export async function queueManualRunServer(payload: { profile_id?: string; job: 
       lease_owner: "",
       lease_expires_at: null,
       dispatched_at: null,
-    }))
-  if (inserts.length) {
-    const { error } = await admin.from("job_runs").insert(inserts)
-    if (error) throw new Error(error.message)
+    }
+  })
+  for (let index = 1; index < childJobs.length; index += 1) {
+    childJobs[index].depends_on_job_run_id = childJobs[index - 1].id
   }
+
+  const { error: refreshError } = await admin.from("refresh_requests").insert(refreshInsert)
+  if (refreshError) throw new Error(refreshError.message)
+  const { error: jobsError } = await admin.from("job_runs").insert(childJobs)
+  if (jobsError) throw new Error(jobsError.message)
   const dispatch = await dispatchDueJobsServer({ leaseOwner: "manual-run", trigger: "manual" })
   return {
     ok: true,
-    queued: inserts.length + rescheduledJobIds.length,
-    running: [...immediateJobTypes].length - (inserts.length + rescheduledJobIds.length),
-    rescheduled: rescheduledJobIds.length,
+    refresh_request_id: refreshRequestId,
+    status: "pending",
+    created: true,
+    stage: stageLabel(validJobTypes[0]),
+    summary: refreshInsert.summary,
+    child_jobs: childJobs.map((job) => jobPayload(job as JobRunRow)),
     dispatch,
   }
 }
@@ -1197,6 +1414,19 @@ export async function dispatchDueJobsServer(options?: {
         .update({ dispatched_at: nowIso() })
         .eq("id", job.id)
       if (dispatchError) throw new Error(dispatchError.message)
+      if (job.refresh_request_id) {
+        const { error: refreshError } = await admin
+          .from("refresh_requests")
+          .update({
+            status: "running",
+            latest_stage: stageLabel(job.job_type),
+            summary: `${stageLabel(job.job_type)} started.`,
+            started_at: nowIso(),
+            updated_at: nowIso(),
+          })
+          .eq("id", job.refresh_request_id)
+        if (refreshError) throw new Error(refreshError.message)
+      }
     } catch {
       released += 1
       const { error: releaseError } = await admin
@@ -1211,6 +1441,17 @@ export async function dispatchDueJobsServer(options?: {
         })
         .eq("id", job.id)
       if (releaseError) throw new Error(releaseError.message)
+      if (job.refresh_request_id) {
+        const { error: refreshError } = await admin
+          .from("refresh_requests")
+          .update({
+            status: "pending",
+            summary: `Dispatch failed for ${job.job_type}; retry scheduled.`,
+            updated_at: nowIso(),
+          })
+          .eq("id", job.refresh_request_id)
+        if (refreshError) throw new Error(refreshError.message)
+      }
     }
   }
   return { claimed: jobs.length, dispatched, released, seeded, jobs: jobs.map((job) => job.id) }

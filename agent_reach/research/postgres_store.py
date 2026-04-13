@@ -13,8 +13,11 @@ from agent_reach.research.models import (
     CreatorWatch,
     IdeaCard,
     JobRun,
+    JobRunEvent,
     JobStatus,
     JobType,
+    RefreshRequest,
+    RefreshRequestStatus,
     ResearchProfile,
     SourceItem,
     StyleProfile,
@@ -643,23 +646,137 @@ class PostgresResearchStore:
             for row in rows
         ]
 
+    def create_refresh_request(self, refresh_request: RefreshRequest) -> RefreshRequest:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO refresh_requests (
+                        id, research_profile_id, trigger, status, query_snapshot,
+                        latest_stage, summary, source_status, started_at, finished_at,
+                        created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        query_snapshot = EXCLUDED.query_snapshot,
+                        latest_stage = EXCLUDED.latest_stage,
+                        summary = EXCLUDED.summary,
+                        source_status = EXCLUDED.source_status,
+                        started_at = EXCLUDED.started_at,
+                        finished_at = EXCLUDED.finished_at,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        refresh_request.id,
+                        refresh_request.research_profile_id,
+                        refresh_request.trigger,
+                        refresh_request.status.value,
+                        _dump(refresh_request.query_snapshot),
+                        refresh_request.latest_stage,
+                        refresh_request.summary,
+                        _dump(refresh_request.source_status),
+                        _iso(refresh_request.started_at),
+                        _iso(refresh_request.finished_at),
+                        _iso(refresh_request.created_at),
+                        _iso(refresh_request.updated_at),
+                    ),
+                )
+        return refresh_request
+
+    def get_refresh_request(self, refresh_request_id: str) -> Optional[RefreshRequest]:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM refresh_requests WHERE id = %s", (refresh_request_id,))
+                row = cur.fetchone()
+        return self._row_to_refresh_request(row) if row else None
+
+    def list_refresh_requests(
+        self,
+        research_profile_id: str,
+        limit: int = 10,
+    ) -> List[RefreshRequest]:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM refresh_requests
+                    WHERE research_profile_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (research_profile_id, max(1, limit)),
+                )
+                rows = cur.fetchall()
+        return [self._row_to_refresh_request(row) for row in rows]
+
+    def update_refresh_request(
+        self,
+        refresh_request_id: str,
+        *,
+        status: Optional[RefreshRequestStatus] = None,
+        latest_stage: Optional[str] = None,
+        summary: Optional[str] = None,
+        source_status: Optional[dict] = None,
+        started_at: Optional[datetime] = None,
+        finished_at: Optional[datetime] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if status is not None:
+            assignments.append("status = %s")
+            values.append(status.value)
+        if latest_stage is not None:
+            assignments.append("latest_stage = %s")
+            values.append(latest_stage)
+        if summary is not None:
+            assignments.append("summary = %s")
+            values.append(summary)
+        if source_status is not None:
+            assignments.append("source_status = %s::jsonb")
+            values.append(_dump(source_status))
+        if started_at is not None:
+            assignments.append("started_at = %s")
+            values.append(_iso(started_at))
+        if finished_at is not None:
+            assignments.append("finished_at = %s")
+            values.append(_iso(finished_at))
+        assignments.append("updated_at = %s")
+        values.append(_iso(updated_at or datetime.now(timezone.utc)))
+        values.append(refresh_request_id)
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE refresh_requests SET {', '.join(assignments)} WHERE id = %s",
+                    values,
+                )
+
     def create_job_run(self, job: JobRun) -> JobRun:
         with self.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO job_runs (
-                        id, research_profile_id, job_type, status, scheduled_for, started_at,
-                        finished_at, attempt_count, input_snapshot, error_summary,
-                        next_run_at, heartbeat_at, lease_token, lease_owner, lease_expires_at, dispatched_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                        id, research_profile_id, refresh_request_id, job_type, status, scheduled_for,
+                        depends_on_job_run_id, started_at, finished_at, attempt_count, input_snapshot,
+                        output_snapshot, current_step, current_source, progress_current, progress_total,
+                        error_summary, next_run_at, heartbeat_at, lease_token, lease_owner,
+                        lease_expires_at, dispatched_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
+                        refresh_request_id = EXCLUDED.refresh_request_id,
                         status = EXCLUDED.status,
                         scheduled_for = EXCLUDED.scheduled_for,
+                        depends_on_job_run_id = EXCLUDED.depends_on_job_run_id,
                         started_at = EXCLUDED.started_at,
                         finished_at = EXCLUDED.finished_at,
                         attempt_count = EXCLUDED.attempt_count,
                         input_snapshot = EXCLUDED.input_snapshot,
+                        output_snapshot = EXCLUDED.output_snapshot,
+                        current_step = EXCLUDED.current_step,
+                        current_source = EXCLUDED.current_source,
+                        progress_current = EXCLUDED.progress_current,
+                        progress_total = EXCLUDED.progress_total,
                         error_summary = EXCLUDED.error_summary,
                         next_run_at = EXCLUDED.next_run_at,
                         heartbeat_at = EXCLUDED.heartbeat_at,
@@ -671,13 +788,20 @@ class PostgresResearchStore:
                     (
                         job.id,
                         job.research_profile_id,
+                        job.refresh_request_id,
                         job.job_type.value,
                         job.status.value,
                         _iso(job.scheduled_for),
+                        job.depends_on_job_run_id,
                         _iso(job.started_at),
                         _iso(job.finished_at),
                         job.attempt_count,
                         _dump(job.input_snapshot),
+                        _dump(job.output_snapshot),
+                        job.current_step,
+                        job.current_source,
+                        job.progress_current,
+                        job.progress_total,
                         job.error_summary,
                         _iso(job.next_run_at),
                         _iso(job.heartbeat_at),
@@ -695,6 +819,20 @@ class PostgresResearchStore:
                 cur.execute("SELECT * FROM job_runs WHERE id = %s", (job_id,))
                 row = cur.fetchone()
         return self._row_to_job(row) if row else None
+
+    def list_jobs_for_refresh(self, refresh_request_id: str) -> List[JobRun]:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM job_runs
+                    WHERE refresh_request_id = %s
+                    ORDER BY scheduled_for ASC, id ASC
+                    """,
+                    (refresh_request_id,),
+                )
+                rows = cur.fetchall()
+        return [self._row_to_job(row) for row in rows]
 
     def claim_due_job(self, now: datetime) -> Optional[JobRun]:
         claimed = self.claim_due_jobs(
@@ -722,6 +860,15 @@ class PostgresResearchStore:
                     SELECT * FROM job_runs
                     WHERE (
                         status = %s AND scheduled_for <= %s
+                        AND (
+                            depends_on_job_run_id = ''
+                            OR EXISTS (
+                                SELECT 1
+                                FROM job_runs dep
+                                WHERE dep.id = job_runs.depends_on_job_run_id
+                                  AND dep.status = %s
+                            )
+                        )
                     ) OR (
                         status = %s AND lease_expires_at IS NOT NULL AND lease_expires_at <= %s
                     )
@@ -732,6 +879,7 @@ class PostgresResearchStore:
                     (
                         JobStatus.PENDING.value,
                         _iso(now),
+                        JobStatus.SUCCEEDED.value,
                         JobStatus.RUNNING.value,
                         _iso(now),
                         max(1, limit),
@@ -782,6 +930,109 @@ class PostgresResearchStore:
                     (_iso(dispatched_at), _iso(dispatched_at), job_id),
                 )
 
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        current_step: Optional[str] = None,
+        current_source: Optional[str] = None,
+        progress_current: Optional[int] = None,
+        progress_total: Optional[int] = None,
+        heartbeat_at: Optional[datetime] = None,
+        output_snapshot: Optional[dict] = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if current_step is not None:
+            assignments.append("current_step = %s")
+            values.append(current_step)
+        if current_source is not None:
+            assignments.append("current_source = %s")
+            values.append(current_source)
+        if progress_current is not None:
+            assignments.append("progress_current = %s")
+            values.append(progress_current)
+        if progress_total is not None:
+            assignments.append("progress_total = %s")
+            values.append(progress_total)
+        if heartbeat_at is not None:
+            assignments.append("heartbeat_at = %s")
+            values.append(_iso(heartbeat_at))
+        if output_snapshot is not None:
+            assignments.append("output_snapshot = %s::jsonb")
+            values.append(_dump(output_snapshot))
+        if not assignments:
+            return
+        values.append(job_id)
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE job_runs SET {', '.join(assignments)} WHERE id = %s", values)
+
+    def add_job_event(self, event: JobRunEvent) -> JobRunEvent:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO job_run_events (
+                        id, job_run_id, refresh_request_id, level, message, step, source,
+                        progress_current, progress_total, event_payload, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        level = EXCLUDED.level,
+                        message = EXCLUDED.message,
+                        step = EXCLUDED.step,
+                        source = EXCLUDED.source,
+                        progress_current = EXCLUDED.progress_current,
+                        progress_total = EXCLUDED.progress_total,
+                        event_payload = EXCLUDED.event_payload
+                    """,
+                    (
+                        event.id,
+                        event.job_run_id,
+                        event.refresh_request_id,
+                        event.level,
+                        event.message,
+                        event.step,
+                        event.source,
+                        event.progress_current,
+                        event.progress_total,
+                        _dump(event.event_payload),
+                        _iso(event.created_at),
+                    ),
+                )
+        return event
+
+    def list_job_events(
+        self,
+        *,
+        refresh_request_id: Optional[str] = None,
+        job_run_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[JobRunEvent]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if refresh_request_id:
+            clauses.append("refresh_request_id = %s")
+            params.append(refresh_request_id)
+        if job_run_id:
+            clauses.append("job_run_id = %s")
+            params.append(job_run_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, limit))
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT * FROM job_run_events
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+        return [self._row_to_job_event(row) for row in rows]
+
     def release_job(self, job_id: str, *, scheduled_for: Optional[datetime] = None) -> None:
         with self.connection() as conn:
             with conn.cursor() as cur:
@@ -793,36 +1044,71 @@ class PostgresResearchStore:
                         lease_token = '',
                         lease_owner = '',
                         lease_expires_at = NULL,
-                        dispatched_at = NULL
+                        dispatched_at = NULL,
+                        current_step = '',
+                        current_source = '',
+                        progress_current = 0,
+                        progress_total = 0
                     WHERE id = %s
                     """,
                     (JobStatus.PENDING.value, _iso(scheduled_for), job_id),
                 )
 
-    def complete_job(self, job_id: str, finished_at: datetime) -> None:
+    def complete_job(
+        self,
+        job_id: str,
+        finished_at: datetime,
+        *,
+        output_snapshot: Optional[dict] = None,
+    ) -> None:
         with self.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE job_runs
                     SET status = %s, finished_at = %s, heartbeat_at = %s,
-                        lease_token = '', lease_owner = '', lease_expires_at = NULL
+                        lease_token = '', lease_owner = '', lease_expires_at = NULL,
+                        current_step = '',
+                        current_source = '',
+                        progress_current = COALESCE(NULLIF(progress_total, 0), progress_current),
+                        output_snapshot = COALESCE(%s::jsonb, output_snapshot)
                     WHERE id = %s
                     """,
-                    (JobStatus.SUCCEEDED.value, _iso(finished_at), _iso(finished_at), job_id),
+                    (
+                        JobStatus.SUCCEEDED.value,
+                        _iso(finished_at),
+                        _iso(finished_at),
+                        _dump(output_snapshot) if output_snapshot is not None else None,
+                        job_id,
+                    ),
                 )
 
-    def fail_job(self, job_id: str, finished_at: datetime, error_summary: str) -> None:
+    def fail_job(
+        self,
+        job_id: str,
+        finished_at: datetime,
+        error_summary: str,
+        *,
+        output_snapshot: Optional[dict] = None,
+    ) -> None:
         with self.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE job_runs
                     SET status = %s, finished_at = %s, heartbeat_at = %s, error_summary = %s,
-                        lease_token = '', lease_owner = '', lease_expires_at = NULL
+                        lease_token = '', lease_owner = '', lease_expires_at = NULL,
+                        output_snapshot = COALESCE(%s::jsonb, output_snapshot)
                     WHERE id = %s
                     """,
-                    (JobStatus.FAILED.value, _iso(finished_at), _iso(finished_at), error_summary, job_id),
+                    (
+                        JobStatus.FAILED.value,
+                        _iso(finished_at),
+                        _iso(finished_at),
+                        error_summary,
+                        _dump(output_snapshot) if output_snapshot is not None else None,
+                        job_id,
+                    ),
                 )
 
     def has_open_job(self, research_profile_id: str, job_type: JobType) -> bool:
@@ -874,17 +1160,55 @@ class PostgresResearchStore:
             updated_at=_dt(row["updated_at"]) or datetime.now(timezone.utc),
         )
 
+    def _row_to_refresh_request(self, row: dict[str, Any]) -> RefreshRequest:
+        return RefreshRequest(
+            id=row["id"],
+            research_profile_id=row["research_profile_id"],
+            trigger=row["trigger"],
+            status=RefreshRequestStatus(row["status"]),
+            query_snapshot=_load(row["query_snapshot"], {}),
+            latest_stage=row["latest_stage"] or "",
+            summary=row["summary"] or "",
+            source_status=_load(row["source_status"], {}),
+            started_at=_dt(row["started_at"]),
+            finished_at=_dt(row["finished_at"]),
+            created_at=_dt(row["created_at"]) or datetime.now(timezone.utc),
+            updated_at=_dt(row["updated_at"]) or datetime.now(timezone.utc),
+        )
+
+    def _row_to_job_event(self, row: dict[str, Any]) -> JobRunEvent:
+        return JobRunEvent(
+            id=row["id"],
+            job_run_id=row["job_run_id"],
+            refresh_request_id=row.get("refresh_request_id") or "",
+            level=row["level"],
+            message=row["message"],
+            step=row.get("step") or "",
+            source=row.get("source") or "",
+            progress_current=row.get("progress_current") or 0,
+            progress_total=row.get("progress_total") or 0,
+            event_payload=_load(row["event_payload"], {}),
+            created_at=_dt(row["created_at"]) or datetime.now(timezone.utc),
+        )
+
     def _row_to_job(self, row: dict[str, Any]) -> JobRun:
         return JobRun(
             id=row["id"],
             research_profile_id=row["research_profile_id"],
+            refresh_request_id=row.get("refresh_request_id") or "",
             job_type=JobType(row["job_type"]),
             status=JobStatus(row["status"]),
             scheduled_for=_dt(row["scheduled_for"]) or datetime.now(timezone.utc),
+            depends_on_job_run_id=row.get("depends_on_job_run_id") or "",
             started_at=_dt(row["started_at"]),
             finished_at=_dt(row["finished_at"]),
             attempt_count=row["attempt_count"],
             input_snapshot=_load(row["input_snapshot"], {}),
+            output_snapshot=_load(row.get("output_snapshot"), {}),
+            current_step=row.get("current_step") or "",
+            current_source=row.get("current_source") or "",
+            progress_current=row.get("progress_current") or 0,
+            progress_total=row.get("progress_total") or 0,
             error_summary=row["error_summary"],
             next_run_at=_dt(row["next_run_at"]),
             heartbeat_at=_dt(row["heartbeat_at"]),

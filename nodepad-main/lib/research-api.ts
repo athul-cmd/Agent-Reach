@@ -79,6 +79,9 @@ export async function loadResearchDashboardClient(): Promise<ResearchDashboardDa
     clusters: data.clusters ?? [],
     ideas: data.ideas ?? [],
     creators: data.creators ?? [],
+    active_refresh: data.active_refresh ?? null,
+    refresh_jobs: data.refresh_jobs ?? [],
+    job_events: data.job_events ?? [],
     jobs: data.jobs ?? [],
     metrics: data.metrics ?? {
       source_item_count: 0,

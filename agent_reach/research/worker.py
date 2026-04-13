@@ -21,6 +21,7 @@ from agent_reach.research.models import (
     CreatorWatch,
     IdeaCard,
     JobRun,
+    JobRunEvent,
     JobStatus,
     JobType,
     ResearchProfile,
@@ -34,6 +35,7 @@ from agent_reach.research.settings import ResearchSettings
 from agent_reach.research.snapshot import serialize_nodepad_snapshot
 from agent_reach.research.store_protocol import ResearchStore
 from agent_reach.research.style import build_style_profile
+from agent_reach.research.planner import build_query_snapshot
 
 
 def _resolve_tz(tz_name: str) -> ZoneInfo:
@@ -84,6 +86,7 @@ class ResearchWorker:
             embedding_model=settings.embedding_model,
         )
         self.adapters = list(adapters or self._default_adapters())
+        self._active_job: JobRun | None = None
 
     def _default_adapters(self) -> List[SourceAdapter]:
         return [WebExaAdapter(), RedditAdapter(), YouTubeAdapter(), XAdapter()]
@@ -93,7 +96,7 @@ class ResearchWorker:
         self.settings.ensure_dirs()
         self.store.initialize()
 
-    def run_job(self, job_type: JobType, profile_id: str) -> dict:
+    def run_job(self, job_type: JobType, profile_id: str, *, job_run_id: str = "") -> dict:
         """Run a single worker job."""
         handlers = {
             JobType.COLLECT_SOURCES: self.collect_sources,
@@ -106,7 +109,14 @@ class ResearchWorker:
         }
         if job_type not in handlers:
             raise ValueError(f"Unsupported job: {job_type}")
-        return handlers[job_type](profile_id)
+        previous_job = self._active_job
+        self._active_job = self.store.get_job(job_run_id) if job_run_id else None
+        try:
+            self._set_progress("starting", progress_current=0, progress_total=1)
+            self._emit_event(f"Starting {job_type.value}.", step="starting")
+            return handlers[job_type](profile_id)
+        finally:
+            self._active_job = previous_job
 
     def run_full_cycle(self, profile_id: str) -> dict:
         """Run the core daily pipeline sequentially."""
@@ -124,22 +134,105 @@ class ResearchWorker:
 
     def collect_sources(self, profile_id: str) -> dict:
         profile = self._require_profile(profile_id)
+        query_snapshot = build_query_snapshot(profile)
         collected = []
         failures = []
-        for adapter in self.adapters:
+        per_source: dict[str, dict] = {}
+        total_sources = len(self.adapters)
+        self._set_progress("collecting", progress_current=0, progress_total=total_sources)
+        for index, adapter in enumerate(self.adapters, start=1):
+            self._set_progress(
+                "collecting",
+                current_source=adapter.source_name,
+                progress_current=index - 1,
+                progress_total=total_sources,
+                output_snapshot={
+                    "queries": query_snapshot["queries"],
+                    "source_status": per_source,
+                },
+            )
+            self._emit_event(
+                f"Collecting {adapter.source_name} results.",
+                step="collecting",
+                source=adapter.source_name,
+                progress_current=index - 1,
+                progress_total=total_sources,
+            )
             if not adapter.is_available():
+                failure = {"source": adapter.source_name, "status": "unavailable", "error": "adapter unavailable"}
                 failures.append(f"{adapter.source_name}: unavailable")
+                per_source[adapter.source_name] = failure
+                self._emit_event(
+                    f"{adapter.source_name} is unavailable on this runner.",
+                    level="warning",
+                    step="collecting",
+                    source=adapter.source_name,
+                    progress_current=index,
+                    progress_total=total_sources,
+                    event_payload=failure,
+                )
                 continue
             try:
-                collected.extend(
-                    adapter.collect(profile, self.settings, self.settings.source_result_limit)
+                source_items = adapter.collect(profile, self.settings, self.settings.source_result_limit)
+                collected.extend(source_items)
+                per_source[adapter.source_name] = {
+                    "source": adapter.source_name,
+                    "status": "ok",
+                    "collected": len(source_items),
+                }
+                self._emit_event(
+                    f"Collected {len(source_items)} items from {adapter.source_name}.",
+                    step="collecting",
+                    source=adapter.source_name,
+                    progress_current=index,
+                    progress_total=total_sources,
+                    event_payload=per_source[adapter.source_name],
                 )
             except Exception as exc:
                 failures.append(f"{adapter.source_name}: {exc}")
+                per_source[adapter.source_name] = {
+                    "source": adapter.source_name,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                self._emit_event(
+                    f"{adapter.source_name} collection failed.",
+                    level="warning",
+                    step="collecting",
+                    source=adapter.source_name,
+                    progress_current=index,
+                    progress_total=total_sources,
+                    event_payload=per_source[adapter.source_name],
+                )
+                continue
+            self._set_progress(
+                "collecting",
+                current_source=adapter.source_name,
+                progress_current=index,
+                progress_total=total_sources,
+                output_snapshot={
+                    "queries": query_snapshot["queries"],
+                    "source_status": per_source,
+                },
+            )
         self.store.upsert_source_items(collected)
-        return {"collected": len(collected), "failures": failures}
+        result = {
+            "queries": query_snapshot["queries"],
+            "collected": len(collected),
+            "source_status": per_source,
+            "failures": failures,
+        }
+        self._set_progress(
+            "collecting",
+            current_source="",
+            progress_current=total_sources,
+            progress_total=total_sources,
+            output_snapshot=result,
+        )
+        return result
 
     def discover_creators(self, profile_id: str) -> dict:
+        self._set_progress("discovering_creators", progress_current=0, progress_total=1)
         items = self.store.list_source_items(profile_id, limit=250)
         grouped = defaultdict(list)
         for item in items:
@@ -161,28 +254,40 @@ class ResearchWorker:
                 )
             )
         self.store.upsert_creator_watchlist(creators)
-        return {"creators": len(creators)}
+        result = {"creators": len(creators)}
+        self._set_progress("discovering_creators", progress_current=1, progress_total=1, output_snapshot=result)
+        self._emit_event("Creator discovery completed.", step="discovering_creators", progress_current=1, progress_total=1, event_payload=result)
+        return result
 
     def refresh_style_profile(self, profile_id: str) -> dict:
+        self._set_progress("refreshing_style", progress_current=0, progress_total=1)
         profile = self._require_profile(profile_id)
         samples = self.store.list_writing_samples(profile_id)
         feedback = self.store.list_feedback(profile_id)
         style_profile = build_style_profile(profile, samples, feedback, self.openai_client)
         self.store.upsert_style_profile(style_profile)
-        return {
+        result = {
             "style_profile_id": style_profile.id,
             "sample_count": len(samples),
             "feedback_count": len(feedback),
         }
+        self._set_progress("refreshing_style", progress_current=1, progress_total=1, output_snapshot=result)
+        self._emit_event("Style profile refreshed.", step="refreshing_style", progress_current=1, progress_total=1, event_payload=result)
+        return result
 
     def cluster_items(self, profile_id: str) -> dict:
+        self._set_progress("clustering", progress_current=0, progress_total=1)
         profile = self._require_profile(profile_id)
         items = self.store.list_source_items(profile_id, limit=500)
         clusters = cluster_source_items(profile, items)
         self.store.upsert_clusters(clusters)
-        return {"clusters": len(clusters), "items": len(items)}
+        result = {"clusters": len(clusters), "items": len(items)}
+        self._set_progress("clustering", progress_current=1, progress_total=1, output_snapshot=result)
+        self._emit_event("Clustering completed.", step="clustering", progress_current=1, progress_total=1, event_payload=result)
+        return result
 
     def rank_topics(self, profile_id: str) -> dict:
+        self._set_progress("ranking", progress_current=0, progress_total=1)
         profile = self._require_profile(profile_id)
         style_profile = self.store.get_latest_style_profile(profile_id)
         items = self.store.list_source_items(profile_id, limit=500)
@@ -195,17 +300,30 @@ class ResearchWorker:
             cluster.final_score = compute_final_score(components)
             cluster.rank_snapshot_at = utc_now()
         self.store.upsert_clusters(clusters)
-        return {"ranked_clusters": len(clusters)}
+        result = {"ranked_clusters": len(clusters)}
+        self._set_progress("ranking", progress_current=1, progress_total=1, output_snapshot=result)
+        self._emit_event("Topic ranking completed.", step="ranking", progress_current=1, progress_total=1, event_payload=result)
+        return result
 
     def generate_ideas(self, profile_id: str) -> dict:
+        self._set_progress("generating_ideas", progress_current=0, progress_total=1)
         clusters = self.store.list_clusters(profile_id)[:10]
         ideas = []
         for cluster in clusters:
             ideas.append(self._idea_from_cluster(cluster, profile_id))
         self.store.upsert_idea_cards(ideas)
-        return {"ideas": len(ideas)}
+        result = {
+            "ideas": len(ideas),
+            "cluster_ids": [cluster.id for cluster in clusters],
+            "evidence_item_ids": sorted({item_id for idea in ideas for item_id in idea.evidence_item_ids}),
+            "model": self.settings.chat_model if self.openai_client.available else "heuristic",
+        }
+        self._set_progress("generating_ideas", progress_current=1, progress_total=1, output_snapshot=result)
+        self._emit_event("Idea generation completed.", step="generating_ideas", progress_current=1, progress_total=1, event_payload=result)
+        return result
 
     def publish_weekly_digest(self, profile_id: str) -> dict:
+        self._set_progress("publishing_digest", progress_current=0, progress_total=1)
         ideas = self.store.list_idea_cards(profile_id, limit=10)
         creators = self.store.list_creator_watchlist(profile_id, limit=10)
         now = utc_now()
@@ -227,7 +345,10 @@ class ResearchWorker:
             payload_text=serialize_nodepad_snapshot(report, ideas, clusters),
             published_at=report.published_at,
         )
-        return {"report_id": report.id, "snapshot_path": snapshot_uri}
+        result = {"report_id": report.id, "snapshot_path": snapshot_uri}
+        self._set_progress("publishing_digest", progress_current=1, progress_total=1, output_snapshot=result)
+        self._emit_event("Weekly digest published.", step="publishing_digest", progress_current=1, progress_total=1, event_payload=result)
+        return result
 
     def _idea_from_cluster(self, cluster, profile_id: str) -> IdeaCard:
         if self.openai_client.available:
@@ -292,6 +413,54 @@ class ResearchWorker:
         if profile is None:
             raise ValueError(f"Unknown research profile: {profile_id}")
         return profile
+
+    def _set_progress(
+        self,
+        step: str,
+        *,
+        current_source: str = "",
+        progress_current: int,
+        progress_total: int,
+        output_snapshot: dict | None = None,
+    ) -> None:
+        if self._active_job is None:
+            return
+        self.store.update_job_progress(
+            self._active_job.id,
+            current_step=step,
+            current_source=current_source,
+            progress_current=progress_current,
+            progress_total=progress_total,
+            heartbeat_at=utc_now(),
+            output_snapshot=output_snapshot,
+        )
+
+    def _emit_event(
+        self,
+        message: str,
+        *,
+        level: str = "info",
+        step: str = "",
+        source: str = "",
+        progress_current: int = 0,
+        progress_total: int = 0,
+        event_payload: dict | None = None,
+    ) -> None:
+        if self._active_job is None:
+            return
+        self.store.add_job_event(
+            JobRunEvent(
+                job_run_id=self._active_job.id,
+                refresh_request_id=self._active_job.refresh_request_id,
+                level=level,
+                message=message,
+                step=step,
+                source=source,
+                progress_current=progress_current,
+                progress_total=progress_total,
+                event_payload=event_payload or {},
+            )
+        )
 
 
 class ResearchScheduler:

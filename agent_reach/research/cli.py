@@ -13,7 +13,14 @@ import textwrap
 from agent_reach.research.api import run_api_server
 from agent_reach.research.health import build_health_report
 from agent_reach.research.maintenance import cleanup_artifacts, prepare_storage, storage_status
-from agent_reach.research.models import JobType, ResearchProfile, UserFeedbackEvent, WritingSample
+from agent_reach.research.models import (
+    JobStatus,
+    JobType,
+    RefreshRequestStatus,
+    ResearchProfile,
+    UserFeedbackEvent,
+    WritingSample,
+)
 from agent_reach.research.runtime import ResearchWorkerService, load_worker_status
 from agent_reach.research.settings import ResearchSettings
 from agent_reach.research.snapshot import write_nodepad_snapshot
@@ -466,11 +473,13 @@ def _handle_run(
         if job is None:
             raise SystemExit(f"Unknown job run: {args.job_run_id}")
         try:
-            result = worker.run_job(job.job_type, job.research_profile_id)
+            result = worker.run_job(job.job_type, job.research_profile_id, job_run_id=job.id)
         except Exception as exc:
             store.fail_job(job.id, datetime.now(timezone.utc), str(exc))
+            _update_refresh_request_after_job(store, job.id)
             raise
-        store.complete_job(job.id, datetime.now(timezone.utc))
+        store.complete_job(job.id, datetime.now(timezone.utc), output_snapshot=result)
+        _update_refresh_request_after_job(store, job.id)
         print(json.dumps({"job": job.job_type.value, "job_run_id": job.id, "result": result}, ensure_ascii=False))
         return
 
@@ -495,12 +504,14 @@ def _handle_run(
         executed = []
         for job in claimed:
             try:
-                result = worker.run_job(job.job_type, job.research_profile_id)
+                result = worker.run_job(job.job_type, job.research_profile_id, job_run_id=job.id)
             except Exception as exc:
                 store.fail_job(job.id, datetime.now(timezone.utc), str(exc))
+                _update_refresh_request_after_job(store, job.id)
                 executed.append({"job_run_id": job.id, "status": "failed", "error": str(exc)})
                 continue
-            store.complete_job(job.id, datetime.now(timezone.utc))
+            store.complete_job(job.id, datetime.now(timezone.utc), output_snapshot=result)
+            _update_refresh_request_after_job(store, job.id)
             executed.append({"job_run_id": job.id, "status": "succeeded", "result": result})
         print(json.dumps({"claimed": len(claimed), "executed": executed}, ensure_ascii=False))
         return
@@ -518,6 +529,43 @@ def _handle_run(
         if iterations and tick_count >= iterations:
             return
         time.sleep(args.sleep_seconds)
+
+
+def _update_refresh_request_after_job(store: ResearchStore, job_id: str) -> None:
+    job = store.get_job(job_id)
+    if job is None or not job.refresh_request_id:
+        return
+    refresh = store.get_refresh_request(job.refresh_request_id)
+    if refresh is None:
+        return
+    siblings = store.list_jobs_for_refresh(job.refresh_request_id)
+    statuses = {item.status for item in siblings}
+    if JobStatus.PENDING in statuses or JobStatus.RUNNING in statuses:
+        store.update_refresh_request(
+            refresh.id,
+            status=RefreshRequestStatus.RUNNING,
+            latest_stage=job.job_type.value,
+            summary=f"{job.job_type.value} updated. Waiting for remaining jobs.",
+            started_at=refresh.started_at or datetime.now(timezone.utc),
+        )
+        return
+
+    succeeded = sum(1 for item in siblings if item.status == JobStatus.SUCCEEDED)
+    failed = sum(1 for item in siblings if item.status == JobStatus.FAILED)
+    if failed and succeeded:
+        final_status = RefreshRequestStatus.PARTIAL
+    elif failed:
+        final_status = RefreshRequestStatus.FAILED
+    else:
+        final_status = RefreshRequestStatus.SUCCEEDED
+    store.update_refresh_request(
+        refresh.id,
+        status=final_status,
+        latest_stage=job.job_type.value,
+        summary=f"Refresh completed with {succeeded} succeeded and {failed} failed jobs.",
+        started_at=refresh.started_at or datetime.now(timezone.utc),
+        finished_at=datetime.now(timezone.utc),
+    )
 
 
 def _handle_report(args: argparse.Namespace, store: ResearchStore, profile_id: str) -> None:

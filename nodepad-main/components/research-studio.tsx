@@ -276,6 +276,32 @@ function verificationSummary(result: VerificationPayload | null): string {
   return result.status
 }
 
+const REFRESH_PIPELINE_STEPS = [
+  { key: "collect_sources", label: "Collecting sources" },
+  { key: "discover_creators", label: "Discovering creators" },
+  { key: "refresh_style_profile", label: "Refreshing style" },
+  { key: "cluster_items", label: "Clustering" },
+  { key: "rank_topics", label: "Ranking" },
+  { key: "generate_ideas", label: "Generating ideas" },
+]
+
+function jobDisplayLabel(jobType: string): string {
+  return REFRESH_PIPELINE_STEPS.find((item) => item.key === jobType)?.label || jobType
+}
+
+function jobProgressLabel(job: ResearchDashboardData["refresh_jobs"][number]): string {
+  if (!job.progress_total) return job.status
+  return `${job.progress_current}/${job.progress_total}`
+}
+
+function activeRefreshSourceStatuses(data: ResearchDashboardData) {
+  const status = data.active_refresh?.source_status || {}
+  return Object.entries(status).map(([key, value]) => ({
+    source: key,
+    payload: value as Record<string, unknown>,
+  }))
+}
+
 function FormInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
@@ -378,6 +404,16 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
     }
   }, [])
 
+  useEffect(() => {
+    const activeRefresh = dashboardData.active_refresh
+    if (!activeRefresh) return
+    if (!["pending", "running"].includes(activeRefresh.status)) return
+    const timer = window.setInterval(() => {
+      void refreshDashboard()
+    }, 15000)
+    return () => window.clearInterval(timer)
+  }, [dashboardData.active_refresh?.id, dashboardData.active_refresh?.status])
+
   function toggleCollapse(id: string) {
     setCollapsedIds((prev) => {
       const next = new Set(prev)
@@ -439,27 +475,18 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
   async function handleRunJob(job: string, _message: string) {
     await runAction(job, async () => {
       const result = await runManualJob({ profile_id: activeProfileId, job }) as {
-        queued?: number
-        running?: number
-        rescheduled?: number
+        refresh_request_id?: string
+        created?: boolean
+        stage?: string
+        summary?: string
+        child_jobs?: Array<{ id: string }>
         dispatch?: { dispatched?: number }
       }
-      const queued = result.queued ?? 0
-      const running = result.running ?? 0
-      const rescheduled = result.rescheduled ?? 0
       const dispatched = result.dispatch?.dispatched ?? 0
-      const queuedSummary =
-        queued > 0
-          ? `Queued ${queued} job${queued === 1 ? "" : "s"}${rescheduled > 0 ? ` (${rescheduled} moved to run now)` : ""}.`
-          : running > 0
-            ? `${running} job${running === 1 ? "" : "s"} already running.`
-            : "No new jobs were added."
-      const summary =
-        dispatched > 0
-          ? `${queuedSummary} Dispatched ${dispatched}.`
-          : queued > 0 || running > 0
-            ? `${queuedSummary} Waiting for background execution.`
-            : queuedSummary
+      const childCount = result.child_jobs?.length ?? 0
+      const summary = result.created
+        ? `${result.summary || `Queued refresh ${result.refresh_request_id}.`} ${dispatched > 0 ? `Dispatched ${dispatched} job${dispatched === 1 ? "" : "s"}.` : "Waiting for background execution."}`
+        : `${result.summary || "A refresh is already in progress."}${childCount > 0 ? ` Tracking ${childCount} pipeline stage${childCount === 1 ? "" : "s"}.` : ""}`
       await refreshDashboard(summary)
     })
   }
@@ -663,21 +690,18 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
             <div className="flex h-full items-center justify-center px-6">
               <div className="max-w-2xl rounded-sm border border-border/60 bg-card/40 p-6">
                 <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-primary/80">
-                  Research API Offline
+                  Research Dashboard Offline
                 </p>
                 <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                  This page expects the Python research API to be reachable at{" "}
+                  This page expects the managed research routes to be reachable at{" "}
                   <code className="rounded bg-black/40 px-1.5 py-0.5 text-foreground">
                     {dashboardData.apiBaseUrl}
                   </code>
                   .
                 </p>
                 <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                  Start it with{" "}
-                  <code className="rounded bg-black/40 px-1.5 py-0.5 text-foreground">
-                    agent-reach research serve
-                  </code>{" "}
-                  and then reload this page.
+                  Check your Supabase-backed app routes, server credentials, and background runner configuration,
+                  then reload this page.
                 </p>
                 {dashboardData.error && (
                   <p className="mt-3 rounded-sm border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive/90">
@@ -961,9 +985,84 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
                 {dashboardData.apiBaseUrl}
               </code>
             </p>
+            {dashboardData.active_refresh ? (
+              <div className="rounded-sm border border-border/50 bg-black/20 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground/50">
+                    Active Refresh
+                  </p>
+                  <span className={`font-mono text-[10px] uppercase tracking-[0.16em] ${statusTone(dashboardData.active_refresh.status === "failed" ? "degraded" : dashboardData.active_refresh.status === "partial" ? "degraded" : "ok")}`}>
+                    {dashboardData.active_refresh.status}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                  {dashboardData.active_refresh.summary || "Refresh pipeline is active."}
+                </p>
+                <div className="mt-3 space-y-2">
+                  {REFRESH_PIPELINE_STEPS.map((step) => {
+                    const job = dashboardData.refresh_jobs.find((item) => item.job_type === step.key)
+                    const tone =
+                      job?.status === "failed"
+                        ? "text-destructive/90"
+                        : job?.status === "succeeded"
+                          ? "text-primary"
+                          : job?.status === "running"
+                            ? "text-amber-300"
+                            : "text-muted-foreground"
+                    return (
+                      <div key={step.key} className="flex items-center justify-between gap-3 rounded-sm border border-border/40 px-3 py-2">
+                        <p className="text-sm text-foreground">{step.label}</p>
+                        <p className={`font-mono text-[10px] uppercase tracking-[0.16em] ${tone}`}>
+                          {job ? `${job.status}${job.progress_total ? ` • ${jobProgressLabel(job)}` : ""}` : "waiting"}
+                        </p>
+                      </div>
+                    )
+                  })}
+                </div>
+                {activeRefreshSourceStatuses(dashboardData).length > 0 && (
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {activeRefreshSourceStatuses(dashboardData).map(({ source, payload }) => (
+                      <div key={source} className="rounded-sm border border-border/40 px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-foreground/80">{source}</p>
+                          <span className={`font-mono text-[10px] uppercase tracking-[0.16em] ${statusTone(String(payload.status || "degraded") === "failed" || String(payload.status || "") === "unavailable" ? "degraded" : "ok")}`}>
+                            {String(payload.status || "unknown")}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {typeof payload.collected === "number"
+                            ? `Collected ${payload.collected} item${payload.collected === 1 ? "" : "s"}`
+                            : String(payload.error || "Waiting for source collection.")}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {dashboardData.job_events.length > 0 && (
+                  <div className="mt-3 rounded-sm border border-border/40 bg-black/10 p-3">
+                    <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground/50">
+                      Recent Pipeline Events
+                    </p>
+                    <div className="space-y-2">
+                      {dashboardData.job_events.slice(0, 6).map((event) => (
+                        <div key={event.id} className="flex items-start justify-between gap-3 text-xs text-muted-foreground">
+                          <p>
+                            {event.message}
+                            {event.source ? ` (${event.source})` : ""}
+                          </p>
+                          <p className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em]">
+                            {event.progress_total ? `${event.progress_current}/${event.progress_total}` : event.level}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
             {lastRun ? (
               <>
-                <p>Latest job: <span className="text-foreground">{lastRun.job_type}</span></p>
+                <p>Latest job: <span className="text-foreground">{jobDisplayLabel(lastRun.job_type)}</span></p>
                 <p>Status: <span className="text-foreground">{lastRun.status}</span></p>
                 <p>Scheduled: <span className="text-foreground">{new Date(lastRun.scheduled_for).toLocaleString()}</span></p>
                 {lastRun.error_summary && (

@@ -5,13 +5,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
+import re
 import shutil
 import subprocess
+import tempfile
 from typing import Any, List
 
 from agent_reach.research.artifacts import write_source_artifact
 from agent_reach.research.adapters.base import SourceAdapter
 from agent_reach.research.models import ResearchProfile, SourceItem
+from agent_reach.research.planner import build_refresh_queries
 from agent_reach.research.settings import ResearchSettings
 
 
@@ -43,25 +47,8 @@ def _safe_load_json_blob(blob: str) -> Any:
     return None
 
 
-def _profile_queries(profile: ResearchProfile, max_queries: int = 3) -> List[str]:
-    queries = []
-    for topic in profile.must_track_topics:
-        topic = topic.strip()
-        if topic:
-            queries.append(topic)
-    if profile.niche_definition.strip():
-        queries.append(profile.niche_definition.strip())
-    if profile.persona_brief.strip():
-        queries.append(profile.persona_brief.strip())
-
-    deduped = []
-    seen = set()
-    for query in queries:
-        compact = " ".join(query.split())
-        if compact.lower() not in seen:
-            seen.add(compact.lower())
-            deduped.append(compact)
-    return deduped[:max_queries] or ["content strategy"]
+def _profile_queries(profile: ResearchProfile, max_queries: int = 4) -> List[str]:
+    return build_refresh_queries(profile, max_queries=max_queries)
 
 
 def _run_command(command: List[str]) -> str:
@@ -76,6 +63,59 @@ def _run_command(command: List[str]) -> str:
     if result.returncode != 0:
         raise RuntimeError((result.stderr or output or "unknown error").strip())
     return output
+
+
+def _load_vtt_text(blob: str) -> str:
+    lines: list[str] = []
+    for raw_line in blob.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.upper().startswith("WEBVTT"):
+            continue
+        if "-->" in line:
+            continue
+        if re.fullmatch(r"\d+", line):
+            continue
+        lines.append(line)
+    compact = " ".join(lines)
+    return re.sub(r"\s+", " ", compact).strip()
+
+
+def _fetch_youtube_transcript(url: str, video_id: str) -> str:
+    with tempfile.TemporaryDirectory(prefix=f"yt-transcript-{video_id}-") as temp_dir:
+        output_template = f"{temp_dir}/%(id)s.%(ext)s"
+        try:
+            _run_command(
+                [
+                    "yt-dlp",
+                    "--skip-download",
+                    "--write-auto-subs",
+                    "--write-subs",
+                    "--sub-langs",
+                    "en.*",
+                    "--sub-format",
+                    "vtt",
+                    "-o",
+                    output_template,
+                    url,
+                ]
+            )
+        except Exception:
+            return ""
+        candidate_dir = os.path.abspath(temp_dir)
+        for path in sorted(os.listdir(candidate_dir)):
+            if not path.startswith(video_id) or not path.endswith(".vtt"):
+                continue
+            full_path = f"{candidate_dir}/{path}"
+            try:
+                with open(full_path, "r", encoding="utf-8") as handle:
+                    transcript = _load_vtt_text(handle.read())
+            except Exception:
+                continue
+            if transcript:
+                return transcript
+    return ""
 
 
 def _flatten_exa_results(payload: Any) -> List[dict]:
@@ -278,6 +318,17 @@ class YouTubeAdapter(SourceAdapter):
                 title = str(result.get("title") or video_id).strip()
                 description = str(result.get("description") or "")
                 uploader = str(result.get("channel") or result.get("uploader") or "youtube")
+                transcript = _fetch_youtube_transcript(url, video_id)
+                transcript_blob_url = ""
+                if transcript:
+                    transcript_blob_url = _artifact_path(
+                        settings=settings,
+                        profile=profile,
+                        source=f"{self.source_name}-transcript",
+                        query=query,
+                        external_id=video_id,
+                        raw_payload={"query": query, "video_id": video_id, "transcript": transcript},
+                    )
                 items.append(
                     SourceItem(
                         research_profile_id=profile.id,
@@ -287,11 +338,13 @@ class YouTubeAdapter(SourceAdapter):
                         author_name=uploader,
                         published_at=_utc_now(),
                         title=title[:300],
-                        body_text=description[:4000],
+                        body_text=(transcript or description)[:4000],
                         engagement={
                             "views": result.get("view_count", 0),
                             "comments": result.get("comment_count", 0),
                             "likes": result.get("like_count", 0),
+                            "transcript_available": bool(transcript),
+                            "transcript_blob_url": transcript_blob_url,
                         },
                         raw_blob_url=_artifact_path(
                             settings=settings,

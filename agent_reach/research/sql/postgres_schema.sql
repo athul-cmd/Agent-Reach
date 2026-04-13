@@ -131,16 +131,38 @@ CREATE TABLE IF NOT EXISTS user_feedback_events (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS refresh_requests (
+    id TEXT PRIMARY KEY,
+    research_profile_id TEXT NOT NULL REFERENCES research_profiles(id) ON DELETE CASCADE,
+    trigger TEXT NOT NULL,
+    status TEXT NOT NULL,
+    query_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    latest_stage TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    source_status JSONB NOT NULL DEFAULT '{}'::jsonb,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS job_runs (
     id TEXT PRIMARY KEY,
     research_profile_id TEXT NOT NULL REFERENCES research_profiles(id) ON DELETE CASCADE,
+    refresh_request_id TEXT NOT NULL DEFAULT '',
     job_type TEXT NOT NULL,
     status TEXT NOT NULL,
     scheduled_for TIMESTAMPTZ NOT NULL,
+    depends_on_job_run_id TEXT NOT NULL DEFAULT '',
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     input_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    output_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    current_step TEXT NOT NULL DEFAULT '',
+    current_source TEXT NOT NULL DEFAULT '',
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER NOT NULL DEFAULT 0,
     error_summary TEXT NOT NULL DEFAULT '',
     next_run_at TIMESTAMPTZ,
     heartbeat_at TIMESTAMPTZ,
@@ -150,6 +172,27 @@ CREATE TABLE IF NOT EXISTS job_runs (
     dispatched_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS job_run_events (
+    id TEXT PRIMARY KEY,
+    job_run_id TEXT NOT NULL REFERENCES job_runs(id) ON DELETE CASCADE,
+    refresh_request_id TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL DEFAULT 'info',
+    message TEXT NOT NULL,
+    step TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER NOT NULL DEFAULT 0,
+    event_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS refresh_request_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS depends_on_job_run_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS output_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS current_step TEXT NOT NULL DEFAULT '';
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS current_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS progress_current INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS progress_total INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS lease_token TEXT NOT NULL DEFAULT '';
 ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS lease_owner TEXT NOT NULL DEFAULT '';
 ALTER TABLE job_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
@@ -172,6 +215,15 @@ BEGIN
         FROM job_runs
         WHERE (
             status = 'pending' AND scheduled_for <= p_now
+            AND (
+                depends_on_job_run_id = ''
+                OR EXISTS (
+                    SELECT 1
+                    FROM job_runs dep
+                    WHERE dep.id = job_runs.depends_on_job_run_id
+                      AND dep.status = 'succeeded'
+                )
+            )
         ) OR (
             status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= p_now
         )
@@ -222,6 +274,15 @@ CREATE INDEX IF NOT EXISTS idx_job_runs_due
 
 CREATE INDEX IF NOT EXISTS idx_job_runs_lease
     ON job_runs (status, lease_expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_requests_profile_created
+    ON refresh_requests (research_profile_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_job_runs_refresh
+    ON job_runs (refresh_request_id, scheduled_for ASC);
+
+CREATE INDEX IF NOT EXISTS idx_job_run_events_refresh_created
+    ON job_run_events (refresh_request_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_source_items_profile_published
     ON source_items (research_profile_id, published_at DESC);

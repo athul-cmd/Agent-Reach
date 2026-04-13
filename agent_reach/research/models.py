@@ -42,6 +42,16 @@ class JobStatus(str, Enum):
     INTERRUPTED = "interrupted"
 
 
+class RefreshRequestStatus(str, Enum):
+    """Lifecycle states for one tracked full refresh pipeline."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
 @dataclass(slots=True)
 class ResearchProfile:
     """Canonical user-authored scope definition."""
@@ -201,10 +211,17 @@ class JobRun:
     job_type: JobType
     status: JobStatus
     scheduled_for: datetime
+    refresh_request_id: str = ""
+    depends_on_job_run_id: str = ""
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     attempt_count: int = 0
     input_snapshot: Dict[str, Any] = field(default_factory=dict)
+    output_snapshot: Dict[str, Any] = field(default_factory=dict)
+    current_step: str = ""
+    current_source: str = ""
+    progress_current: int = 0
+    progress_total: int = 0
     error_summary: str = ""
     next_run_at: Optional[datetime] = None
     heartbeat_at: Optional[datetime] = None
@@ -213,3 +230,38 @@ class JobRun:
     lease_expires_at: Optional[datetime] = None
     dispatched_at: Optional[datetime] = None
     id: str = field(default_factory=lambda: new_id("job"))
+
+
+@dataclass(slots=True)
+class RefreshRequest:
+    """One tracked manual or scheduled refresh request."""
+
+    research_profile_id: str
+    trigger: str
+    status: RefreshRequestStatus
+    query_snapshot: Dict[str, Any] = field(default_factory=dict)
+    latest_stage: str = ""
+    summary: str = ""
+    source_status: Dict[str, Any] = field(default_factory=dict)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+    id: str = field(default_factory=lambda: new_id("refresh"))
+
+
+@dataclass(slots=True)
+class JobRunEvent:
+    """Progress/event log emitted while a refresh pipeline executes."""
+
+    job_run_id: str
+    message: str
+    refresh_request_id: str = ""
+    level: str = "info"
+    step: str = ""
+    source: str = ""
+    progress_current: int = 0
+    progress_total: int = 0
+    event_payload: Dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    id: str = field(default_factory=lambda: new_id("event"))

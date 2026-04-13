@@ -6,8 +6,11 @@ from datetime import timedelta
 from agent_reach.research.models import (
     IdeaCard,
     JobRun,
+    JobRunEvent,
     JobStatus,
     JobType,
+    RefreshRequest,
+    RefreshRequestStatus,
     ResearchProfile,
     WritingSample,
     utc_now,
@@ -186,3 +189,94 @@ def test_store_release_job_returns_it_to_pending_and_clears_lease(tmp_path):
     assert released.lease_owner == ""
     assert released.lease_expires_at is None
     assert released.dispatched_at is None
+
+
+def test_store_tracks_refresh_requests_events_and_dependency_aware_claims(tmp_path):
+    store = SQLiteResearchStore(tmp_path / "research.db")
+    store.initialize()
+
+    profile = ResearchProfile(
+        name="Ops",
+        persona_brief="Operator",
+        niche_definition="AI operations",
+    )
+    store.upsert_profile(profile)
+
+    refresh = RefreshRequest(
+        research_profile_id=profile.id,
+        trigger="manual_full_refresh",
+        status=RefreshRequestStatus.PENDING,
+        query_snapshot={"queries": ["ai operations"]},
+    )
+    store.create_refresh_request(refresh)
+
+    now = utc_now()
+    collect_job = JobRun(
+        research_profile_id=profile.id,
+        refresh_request_id=refresh.id,
+        job_type=JobType.COLLECT_SOURCES,
+        status=JobStatus.PENDING,
+        scheduled_for=now - timedelta(minutes=1),
+    )
+    idea_job = JobRun(
+        research_profile_id=profile.id,
+        refresh_request_id=refresh.id,
+        job_type=JobType.GENERATE_IDEAS,
+        status=JobStatus.PENDING,
+        scheduled_for=now - timedelta(minutes=1),
+        depends_on_job_run_id=collect_job.id,
+    )
+    store.create_job_run(collect_job)
+    store.create_job_run(idea_job)
+
+    claimed = store.claim_due_jobs(
+        now,
+        limit=5,
+        lease_for=timedelta(minutes=20),
+        lease_owner="scheduler",
+    )
+    assert [job.id for job in claimed] == [collect_job.id]
+
+    store.add_job_event(
+        JobRunEvent(
+            refresh_request_id=refresh.id,
+            job_run_id=collect_job.id,
+            message="Collecting web results.",
+            step="collecting",
+            source="web",
+            progress_current=1,
+            progress_total=4,
+        )
+    )
+    store.update_job_progress(
+        collect_job.id,
+        current_step="collecting",
+        current_source="web",
+        progress_current=1,
+        progress_total=4,
+        output_snapshot={"source_status": {"web": {"collected": 3}}},
+    )
+    store.complete_job(collect_job.id, utc_now(), output_snapshot={"collected": 3})
+
+    refresh_events = store.list_job_events(refresh_request_id=refresh.id)
+    assert len(refresh_events) == 1
+    assert refresh_events[0].source == "web"
+
+    next_claimed = store.claim_due_jobs(
+        utc_now(),
+        limit=5,
+        lease_for=timedelta(minutes=20),
+        lease_owner="scheduler",
+    )
+    assert [job.id for job in next_claimed] == [idea_job.id]
+
+    store.update_refresh_request(
+        refresh.id,
+        status=RefreshRequestStatus.RUNNING,
+        latest_stage="collect_sources",
+        summary="Collecting sources.",
+    )
+    loaded_refresh = store.get_refresh_request(refresh.id)
+    assert loaded_refresh is not None
+    assert loaded_refresh.status == RefreshRequestStatus.RUNNING
+    assert loaded_refresh.latest_stage == "collect_sources"

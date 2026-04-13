@@ -22,6 +22,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -c constraints.txt -e .[postgres,crypto]
 
+      - name: Bootstrap source collectors
+        env:
+          RESEARCH_INSTALL_REDDIT_CMD: ${{ secrets.RESEARCH_INSTALL_REDDIT_CMD }}
+          RESEARCH_INSTALL_TWITTER_CMD: ${{ secrets.RESEARCH_INSTALL_TWITTER_CMD }}
+        run: |
+          chmod +x .github/scripts/bootstrap-research-collectors.sh
+          ./.github/scripts/bootstrap-research-collectors.sh
+
       - name: Claim and execute due jobs
         env:
           AGENT_REACH_RESEARCH_DB_BACKEND: supabase
@@ -33,5 +41,7 @@ jobs:
           AGENT_REACH_RESEARCH_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.AGENT_REACH_RESEARCH_SUPABASE_SERVICE_ROLE_KEY }}
           AGENT_REACH_RESEARCH_SETTINGS_ENCRYPTION_KEY: ${{ secrets.AGENT_REACH_RESEARCH_SETTINGS_ENCRYPTION_KEY }}
           AGENT_REACH_RESEARCH_SUPABASE_OWNER_USER_ID: ${{ secrets.AGENT_REACH_RESEARCH_SUPABASE_OWNER_USER_ID }}
+          TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+          TWITTER_CT0: ${{ secrets.TWITTER_CT0 }}
         run: |
           agent-reach research run dispatch --lease-owner github-actions-fallback --execute --limit 4

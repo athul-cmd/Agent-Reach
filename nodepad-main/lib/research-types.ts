@@ -99,16 +99,52 @@ export interface WeeklyReportPayload {
 export interface JobRunPayload {
   id: string
   research_profile_id: string
+  refresh_request_id: string
   job_type: string
   status: string
   scheduled_for: string
+  depends_on_job_run_id: string
   started_at: string | null
   finished_at: string | null
   attempt_count: number
   input_snapshot: Record<string, unknown>
+  output_snapshot: Record<string, unknown>
+  current_step: string
+  current_source: string
+  progress_current: number
+  progress_total: number
   error_summary: string
   next_run_at: string | null
   heartbeat_at: string | null
+}
+
+export interface RefreshRequestPayload {
+  id: string
+  research_profile_id: string
+  trigger: string
+  status: string
+  query_snapshot: Record<string, unknown>
+  latest_stage: string
+  summary: string
+  source_status: Record<string, unknown>
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface JobRunEventPayload {
+  id: string
+  job_run_id: string
+  refresh_request_id: string
+  level: string
+  message: string
+  step: string
+  source: string
+  progress_current: number
+  progress_total: number
+  event_payload: Record<string, unknown>
+  created_at: string
 }
 
 export interface SourceHealthPayload {
@@ -231,6 +267,9 @@ export interface ResearchDashboardData {
   clusters: TopicClusterPayload[]
   ideas: IdeaCardPayload[]
   creators: CreatorWatchPayload[]
+  active_refresh: RefreshRequestPayload | null
+  refresh_jobs: JobRunPayload[]
+  job_events: JobRunEventPayload[]
   jobs: JobRunPayload[]
   metrics: {
     source_item_count: number

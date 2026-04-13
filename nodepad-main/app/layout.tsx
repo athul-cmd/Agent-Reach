@@ -1,15 +1,6 @@
 import type { Metadata } from 'next'
-import { Geist, Geist_Mono, Vazirmatn } from 'next/font/google'
 import { MobileWall } from '@/components/mobile-wall'
 import './globals.css'
-
-const _geist = Geist({ subsets: ["latin"] });
-const _geistMono = Geist_Mono({ subsets: ["latin"] });
-const vazirmatn = Vazirmatn({
-  subsets: ["arabic"],
-  variable: "--font-vazirmatn",
-  display: "swap",
-});
 
 function metadataBaseUrl(): URL {
   const explicit = process.env.NEXT_PUBLIC_SITE_URL?.trim()
@@ -62,7 +53,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`font-sans antialiased ${vazirmatn.variable}`} suppressHydrationWarning>
+      <body className="font-sans antialiased" suppressHydrationWarning>
         <MobileWall />
         {children}
       </body>

@@ -10,7 +10,10 @@ from agent_reach.research.models import (
     CreatorWatch,
     IdeaCard,
     JobRun,
+    JobRunEvent,
     JobType,
+    RefreshRequest,
+    RefreshRequestStatus,
     ResearchProfile,
     SourceItem,
     StyleProfile,
@@ -75,9 +78,34 @@ class ResearchStore(Protocol):
 
     def list_feedback(self, research_profile_id: str) -> List[UserFeedbackEvent]: ...
 
+    def create_refresh_request(self, refresh_request: RefreshRequest) -> RefreshRequest: ...
+
+    def get_refresh_request(self, refresh_request_id: str) -> Optional[RefreshRequest]: ...
+
+    def list_refresh_requests(
+        self,
+        research_profile_id: str,
+        limit: int = 10,
+    ) -> List[RefreshRequest]: ...
+
+    def update_refresh_request(
+        self,
+        refresh_request_id: str,
+        *,
+        status: Optional[RefreshRequestStatus] = None,
+        latest_stage: Optional[str] = None,
+        summary: Optional[str] = None,
+        source_status: Optional[dict] = None,
+        started_at: Optional[datetime] = None,
+        finished_at: Optional[datetime] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> None: ...
+
     def create_job_run(self, job: JobRun) -> JobRun: ...
 
     def get_job(self, job_id: str) -> Optional[JobRun]: ...
+
+    def list_jobs_for_refresh(self, refresh_request_id: str) -> List[JobRun]: ...
 
     def claim_due_job(self, now: datetime) -> Optional[JobRun]: ...
 
@@ -92,11 +120,46 @@ class ResearchStore(Protocol):
 
     def mark_job_dispatched(self, job_id: str, dispatched_at: datetime) -> None: ...
 
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        current_step: Optional[str] = None,
+        current_source: Optional[str] = None,
+        progress_current: Optional[int] = None,
+        progress_total: Optional[int] = None,
+        heartbeat_at: Optional[datetime] = None,
+        output_snapshot: Optional[dict] = None,
+    ) -> None: ...
+
+    def add_job_event(self, event: JobRunEvent) -> JobRunEvent: ...
+
+    def list_job_events(
+        self,
+        *,
+        refresh_request_id: Optional[str] = None,
+        job_run_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[JobRunEvent]: ...
+
     def release_job(self, job_id: str, *, scheduled_for: Optional[datetime] = None) -> None: ...
 
-    def complete_job(self, job_id: str, finished_at: datetime) -> None: ...
+    def complete_job(
+        self,
+        job_id: str,
+        finished_at: datetime,
+        *,
+        output_snapshot: Optional[dict] = None,
+    ) -> None: ...
 
-    def fail_job(self, job_id: str, finished_at: datetime, error_summary: str) -> None: ...
+    def fail_job(
+        self,
+        job_id: str,
+        finished_at: datetime,
+        error_summary: str,
+        *,
+        output_snapshot: Optional[dict] = None,
+    ) -> None: ...
 
     def has_open_job(self, research_profile_id: str, job_type: JobType) -> bool: ...
 

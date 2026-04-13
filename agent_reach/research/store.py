@@ -14,8 +14,11 @@ from agent_reach.research.models import (
     CreatorWatch,
     IdeaCard,
     JobRun,
+    JobRunEvent,
     JobStatus,
     JobType,
+    RefreshRequest,
+    RefreshRequestStatus,
     ResearchProfile,
     SourceItem,
     StyleProfile,
@@ -175,16 +178,38 @@ class SQLiteResearchStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS refresh_requests (
+                    id TEXT PRIMARY KEY,
+                    research_profile_id TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    query_snapshot TEXT NOT NULL,
+                    latest_stage TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    source_status TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS job_runs (
                     id TEXT PRIMARY KEY,
                     research_profile_id TEXT NOT NULL,
+                    refresh_request_id TEXT NOT NULL DEFAULT '',
                     job_type TEXT NOT NULL,
                     status TEXT NOT NULL,
                     scheduled_for TEXT NOT NULL,
+                    depends_on_job_run_id TEXT NOT NULL DEFAULT '',
                     started_at TEXT,
                     finished_at TEXT,
                     attempt_count INTEGER NOT NULL,
                     input_snapshot TEXT NOT NULL,
+                    output_snapshot TEXT NOT NULL DEFAULT '{}',
+                    current_step TEXT NOT NULL DEFAULT '',
+                    current_source TEXT NOT NULL DEFAULT '',
+                    progress_current INTEGER NOT NULL DEFAULT 0,
+                    progress_total INTEGER NOT NULL DEFAULT 0,
                     error_summary TEXT NOT NULL,
                     next_run_at TEXT,
                     heartbeat_at TEXT,
@@ -194,11 +219,41 @@ class SQLiteResearchStore:
                     dispatched_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS job_run_events (
+                    id TEXT PRIMARY KEY,
+                    job_run_id TEXT NOT NULL,
+                    refresh_request_id TEXT NOT NULL DEFAULT '',
+                    level TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    step TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    progress_current INTEGER NOT NULL DEFAULT 0,
+                    progress_total INTEGER NOT NULL DEFAULT 0,
+                    event_payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_job_due
                 ON job_runs (status, scheduled_for);
+
+                CREATE INDEX IF NOT EXISTS idx_refresh_requests_profile_created
+                ON refresh_requests (research_profile_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_job_runs_refresh
+                ON job_runs (refresh_request_id, scheduled_for ASC);
+
+                CREATE INDEX IF NOT EXISTS idx_job_run_events_refresh_created
+                ON job_run_events (refresh_request_id, created_at DESC);
                 """
             )
             for statement in (
+                "ALTER TABLE job_runs ADD COLUMN refresh_request_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE job_runs ADD COLUMN depends_on_job_run_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE job_runs ADD COLUMN output_snapshot TEXT NOT NULL DEFAULT '{}'",
+                "ALTER TABLE job_runs ADD COLUMN current_step TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE job_runs ADD COLUMN current_source TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE job_runs ADD COLUMN progress_current INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE job_runs ADD COLUMN progress_total INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE job_runs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE job_runs ADD COLUMN lease_owner TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE job_runs ADD COLUMN lease_expires_at TEXT",
@@ -757,26 +812,128 @@ class SQLiteResearchStore:
             for row in rows
         ]
 
+    def create_refresh_request(self, refresh_request: RefreshRequest) -> RefreshRequest:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO refresh_requests (
+                    id, research_profile_id, trigger, status, query_snapshot,
+                    latest_stage, summary, source_status, started_at, finished_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    refresh_request.id,
+                    refresh_request.research_profile_id,
+                    refresh_request.trigger,
+                    refresh_request.status.value,
+                    _dump(refresh_request.query_snapshot),
+                    refresh_request.latest_stage,
+                    refresh_request.summary,
+                    _dump(refresh_request.source_status),
+                    _iso(refresh_request.started_at),
+                    _iso(refresh_request.finished_at),
+                    _iso(refresh_request.created_at),
+                    _iso(refresh_request.updated_at),
+                ),
+            )
+        return refresh_request
+
+    def get_refresh_request(self, refresh_request_id: str) -> Optional[RefreshRequest]:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM refresh_requests WHERE id = ?",
+                (refresh_request_id,),
+            ).fetchone()
+        return self._row_to_refresh_request(row) if row else None
+
+    def list_refresh_requests(
+        self,
+        research_profile_id: str,
+        limit: int = 10,
+    ) -> List[RefreshRequest]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM refresh_requests
+                WHERE research_profile_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (research_profile_id, max(1, limit)),
+            ).fetchall()
+        return [self._row_to_refresh_request(row) for row in rows]
+
+    def update_refresh_request(
+        self,
+        refresh_request_id: str,
+        *,
+        status: Optional[RefreshRequestStatus] = None,
+        latest_stage: Optional[str] = None,
+        summary: Optional[str] = None,
+        source_status: Optional[dict] = None,
+        started_at: Optional[datetime] = None,
+        finished_at: Optional[datetime] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(status.value)
+        if latest_stage is not None:
+            assignments.append("latest_stage = ?")
+            values.append(latest_stage)
+        if summary is not None:
+            assignments.append("summary = ?")
+            values.append(summary)
+        if source_status is not None:
+            assignments.append("source_status = ?")
+            values.append(_dump(source_status))
+        if started_at is not None:
+            assignments.append("started_at = ?")
+            values.append(_iso(started_at))
+        if finished_at is not None:
+            assignments.append("finished_at = ?")
+            values.append(_iso(finished_at))
+        assignments.append("updated_at = ?")
+        values.append(_iso(updated_at or datetime.now(timezone.utc)))
+        values.append(refresh_request_id)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE refresh_requests SET {', '.join(assignments)} WHERE id = ?",
+                values,
+            )
+
     def create_job_run(self, job: JobRun) -> JobRun:
         with self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO job_runs (
-                    id, research_profile_id, job_type, status, scheduled_for, started_at,
-                    finished_at, attempt_count, input_snapshot, error_summary,
-                    next_run_at, heartbeat_at, lease_token, lease_owner, lease_expires_at, dispatched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, research_profile_id, refresh_request_id, job_type, status, scheduled_for,
+                    depends_on_job_run_id, started_at, finished_at, attempt_count, input_snapshot,
+                    output_snapshot, current_step, current_source, progress_current, progress_total,
+                    error_summary, next_run_at, heartbeat_at, lease_token, lease_owner,
+                    lease_expires_at, dispatched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
                     job.research_profile_id,
+                    job.refresh_request_id,
                     job.job_type.value,
                     job.status.value,
                     _iso(job.scheduled_for),
+                    job.depends_on_job_run_id,
                     _iso(job.started_at),
                     _iso(job.finished_at),
                     job.attempt_count,
                     _dump(job.input_snapshot),
+                    _dump(job.output_snapshot),
+                    job.current_step,
+                    job.current_source,
+                    job.progress_current,
+                    job.progress_total,
                     job.error_summary,
                     _iso(job.next_run_at),
                     _iso(job.heartbeat_at),
@@ -792,6 +949,18 @@ class SQLiteResearchStore:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM job_runs WHERE id = ?", (job_id,)).fetchone()
         return self._row_to_job(row) if row else None
+
+    def list_jobs_for_refresh(self, refresh_request_id: str) -> List[JobRun]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM job_runs
+                WHERE refresh_request_id = ?
+                ORDER BY scheduled_for ASC, rowid ASC
+                """,
+                (refresh_request_id,),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
 
     def claim_due_job(self, now: datetime) -> Optional[JobRun]:
         """Claim the next pending due job."""
@@ -819,6 +988,15 @@ class SQLiteResearchStore:
                 SELECT * FROM job_runs
                 WHERE (
                     status = ? AND scheduled_for <= ?
+                    AND (
+                        depends_on_job_run_id = ''
+                        OR EXISTS (
+                            SELECT 1
+                            FROM job_runs dep
+                            WHERE dep.id = job_runs.depends_on_job_run_id
+                              AND dep.status = ?
+                        )
+                    )
                 ) OR (
                     status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
                 )
@@ -828,6 +1006,7 @@ class SQLiteResearchStore:
                 (
                     JobStatus.PENDING.value,
                     _iso(now),
+                    JobStatus.SUCCEEDED.value,
                     JobStatus.RUNNING.value,
                     _iso(now),
                     max(1, limit),
@@ -870,37 +1049,153 @@ class SQLiteResearchStore:
                 (_iso(dispatched_at), _iso(dispatched_at), job_id),
             )
 
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        current_step: Optional[str] = None,
+        current_source: Optional[str] = None,
+        progress_current: Optional[int] = None,
+        progress_total: Optional[int] = None,
+        heartbeat_at: Optional[datetime] = None,
+        output_snapshot: Optional[dict] = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if current_step is not None:
+            assignments.append("current_step = ?")
+            values.append(current_step)
+        if current_source is not None:
+            assignments.append("current_source = ?")
+            values.append(current_source)
+        if progress_current is not None:
+            assignments.append("progress_current = ?")
+            values.append(progress_current)
+        if progress_total is not None:
+            assignments.append("progress_total = ?")
+            values.append(progress_total)
+        if heartbeat_at is not None:
+            assignments.append("heartbeat_at = ?")
+            values.append(_iso(heartbeat_at))
+        if output_snapshot is not None:
+            assignments.append("output_snapshot = ?")
+            values.append(_dump(output_snapshot))
+        if not assignments:
+            return
+        values.append(job_id)
+        with self.connection() as conn:
+            conn.execute(f"UPDATE job_runs SET {', '.join(assignments)} WHERE id = ?", values)
+
+    def add_job_event(self, event: JobRunEvent) -> JobRunEvent:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO job_run_events (
+                    id, job_run_id, refresh_request_id, level, message, step, source,
+                    progress_current, progress_total, event_payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.job_run_id,
+                    event.refresh_request_id,
+                    event.level,
+                    event.message,
+                    event.step,
+                    event.source,
+                    event.progress_current,
+                    event.progress_total,
+                    _dump(event.event_payload),
+                    _iso(event.created_at),
+                ),
+            )
+        return event
+
+    def list_job_events(
+        self,
+        *,
+        refresh_request_id: Optional[str] = None,
+        job_run_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[JobRunEvent]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if refresh_request_id:
+            clauses.append("refresh_request_id = ?")
+            params.append(refresh_request_id)
+        if job_run_id:
+            clauses.append("job_run_id = ?")
+            params.append(job_run_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, limit))
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM job_run_events
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._row_to_job_event(row) for row in rows]
+
     def release_job(self, job_id: str, *, scheduled_for: Optional[datetime] = None) -> None:
         with self.connection() as conn:
             conn.execute(
                 """
                 UPDATE job_runs
                 SET status = ?, scheduled_for = COALESCE(?, scheduled_for),
-                    lease_token = '', lease_owner = '', lease_expires_at = NULL, dispatched_at = NULL
+                    lease_token = '', lease_owner = '', lease_expires_at = NULL, dispatched_at = NULL,
+                    current_source = '', current_step = '',
+                    progress_current = 0, progress_total = 0
                 WHERE id = ?
                 """,
                 (JobStatus.PENDING.value, _iso(scheduled_for), job_id),
             )
 
-    def complete_job(self, job_id: str, finished_at: datetime) -> None:
+    def complete_job(
+        self,
+        job_id: str,
+        finished_at: datetime,
+        *,
+        output_snapshot: Optional[dict] = None,
+    ) -> None:
         with self.connection() as conn:
             conn.execute(
                 """
                 UPDATE job_runs
                 SET status = ?, finished_at = ?, heartbeat_at = ?,
-                    lease_token = '', lease_owner = '', lease_expires_at = NULL
+                    lease_token = '', lease_owner = '', lease_expires_at = NULL,
+                    current_source = '', current_step = '',
+                    progress_current = COALESCE(NULLIF(progress_total, 0), progress_current),
+                    output_snapshot = COALESCE(?, output_snapshot)
                 WHERE id = ?
                 """,
-                (JobStatus.SUCCEEDED.value, _iso(finished_at), _iso(finished_at), job_id),
+                (
+                    JobStatus.SUCCEEDED.value,
+                    _iso(finished_at),
+                    _iso(finished_at),
+                    _dump(output_snapshot) if output_snapshot is not None else None,
+                    job_id,
+                ),
             )
 
-    def fail_job(self, job_id: str, finished_at: datetime, error_summary: str) -> None:
+    def fail_job(
+        self,
+        job_id: str,
+        finished_at: datetime,
+        error_summary: str,
+        *,
+        output_snapshot: Optional[dict] = None,
+    ) -> None:
         with self.connection() as conn:
             conn.execute(
                 """
                 UPDATE job_runs
                 SET status = ?, finished_at = ?, heartbeat_at = ?, error_summary = ?,
-                    lease_token = '', lease_owner = '', lease_expires_at = NULL
+                    lease_token = '', lease_owner = '', lease_expires_at = NULL,
+                    output_snapshot = COALESCE(?, output_snapshot)
                 WHERE id = ?
                 """,
                 (
@@ -908,6 +1203,7 @@ class SQLiteResearchStore:
                     _iso(finished_at),
                     _iso(finished_at),
                     error_summary,
+                    _dump(output_snapshot) if output_snapshot is not None else None,
                     job_id,
                 ),
             )
@@ -942,17 +1238,55 @@ class SQLiteResearchStore:
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 
+    def _row_to_refresh_request(self, row: sqlite3.Row) -> RefreshRequest:
+        return RefreshRequest(
+            id=row["id"],
+            research_profile_id=row["research_profile_id"],
+            trigger=row["trigger"],
+            status=RefreshRequestStatus(row["status"]),
+            query_snapshot=_load(row["query_snapshot"], {}),
+            latest_stage=row["latest_stage"] or "",
+            summary=row["summary"] or "",
+            source_status=_load(row["source_status"], {}),
+            started_at=_dt(row["started_at"]),
+            finished_at=_dt(row["finished_at"]),
+            created_at=_dt(row["created_at"]) or datetime.now(timezone.utc),
+            updated_at=_dt(row["updated_at"]) or datetime.now(timezone.utc),
+        )
+
+    def _row_to_job_event(self, row: sqlite3.Row) -> JobRunEvent:
+        return JobRunEvent(
+            id=row["id"],
+            job_run_id=row["job_run_id"],
+            refresh_request_id=row["refresh_request_id"] or "",
+            level=row["level"],
+            message=row["message"],
+            step=row["step"] or "",
+            source=row["source"] or "",
+            progress_current=row["progress_current"] or 0,
+            progress_total=row["progress_total"] or 0,
+            event_payload=_load(row["event_payload"], {}),
+            created_at=_dt(row["created_at"]) or datetime.now(timezone.utc),
+        )
+
     def _row_to_job(self, row: sqlite3.Row) -> JobRun:
         return JobRun(
             id=row["id"],
             research_profile_id=row["research_profile_id"],
+            refresh_request_id=row["refresh_request_id"] or "",
             job_type=JobType(row["job_type"]),
             status=JobStatus(row["status"]),
             scheduled_for=_dt(row["scheduled_for"]) or datetime.now(timezone.utc),
+            depends_on_job_run_id=row["depends_on_job_run_id"] or "",
             started_at=_dt(row["started_at"]),
             finished_at=_dt(row["finished_at"]),
             attempt_count=row["attempt_count"],
             input_snapshot=_load(row["input_snapshot"], {}),
+            output_snapshot=_load(row["output_snapshot"], {}),
+            current_step=row["current_step"] or "",
+            current_source=row["current_source"] or "",
+            progress_current=row["progress_current"] or 0,
+            progress_total=row["progress_total"] or 0,
             error_summary=row["error_summary"],
             next_run_at=_dt(row["next_run_at"]),
             heartbeat_at=_dt(row["heartbeat_at"]),
