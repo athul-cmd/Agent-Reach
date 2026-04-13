@@ -5,9 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "dev:webpack": "next dev --webpack",
-    "build": "next build --webpack && node ./scripts/vercel-artifact-compat.mjs",
+    "build": "next build --webpack",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "lint": "npm run typecheck",
     "test": "node --test --experimental-strip-types lib/*.test.ts"
   },

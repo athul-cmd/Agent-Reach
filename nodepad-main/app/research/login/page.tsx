@@ -1,4 +1,5 @@
 import { Suspense } from "react"
+import { redirectAuthenticatedResearchUser } from "@/lib/research-page-auth"
 import { ResearchLoginClient } from "./login-client"
 
 function LoginFallback() {
@@ -9,7 +10,8 @@ function LoginFallback() {
   )
 }
 
-export default function ResearchLoginPage() {
+export default async function ResearchLoginPage() {
+  await redirectAuthenticatedResearchUser("/research")
   return (
     <Suspense fallback={<LoginFallback />}>
       <ResearchLoginClient />
