@@ -294,12 +294,67 @@ function jobProgressLabel(job: ResearchDashboardData["refresh_jobs"][number]): s
   return `${job.progress_current}/${job.progress_total}`
 }
 
+function refreshCompletionPercent(data: ResearchDashboardData): number {
+  if (!data.refresh_jobs.length) return 0
+  const completed = data.refresh_jobs.filter((job) => job.status === "succeeded").length
+  return Math.round((completed / data.refresh_jobs.length) * 100)
+}
+
+function refreshStageTone(status: string): string {
+  if (status === "failed") return "border-destructive/40 bg-destructive/10 text-destructive/90"
+  if (status === "succeeded") return "border-primary/30 bg-primary/10 text-primary"
+  if (status === "running") return "border-amber-400/30 bg-amber-400/10 text-amber-200"
+  return "border-border/40 bg-black/10 text-muted-foreground"
+}
+
 function activeRefreshSourceStatuses(data: ResearchDashboardData) {
   const status = data.active_refresh?.source_status || {}
   return Object.entries(status).map(([key, value]) => ({
     source: key,
     payload: value as Record<string, unknown>,
   }))
+}
+
+function sourceStatusDetail(payload: Record<string, unknown>): string {
+  if (typeof payload.collected === "number") {
+    return `Collected ${payload.collected} item${payload.collected === 1 ? "" : "s"}`
+  }
+  if (typeof payload.error === "string" && payload.error.trim()) {
+    return payload.error
+  }
+  return "Waiting for source collection."
+}
+
+function sourceStatusTone(payload: Record<string, unknown>): string {
+  const status = String(payload.status || "unknown")
+  if (status === "failed" || status === "unavailable") return "text-destructive/90"
+  if (status === "ok") return "text-primary"
+  return "text-amber-300"
+}
+
+function outputSnapshotSummary(snapshot: Record<string, unknown>): string {
+  if (typeof snapshot.collected === "number") {
+    return `Collected ${snapshot.collected} source items`
+  }
+  if (typeof snapshot.creators === "number") {
+    return `Generated ${snapshot.creators} creators`
+  }
+  if (typeof snapshot.sample_count === "number") {
+    return `Used ${snapshot.sample_count} samples and ${Number(snapshot.feedback_count || 0)} feedback events`
+  }
+  if (typeof snapshot.clusters === "number") {
+    return `Built ${snapshot.clusters} clusters from ${Number(snapshot.items || 0)} items`
+  }
+  if (typeof snapshot.ranked_clusters === "number") {
+    return `Ranked ${snapshot.ranked_clusters} clusters`
+  }
+  if (typeof snapshot.ideas === "number") {
+    return `Generated ${snapshot.ideas} ideas`
+  }
+  if (typeof snapshot.report_id === "string") {
+    return `Published report ${snapshot.report_id}`
+  }
+  return "Stage completed."
 }
 
 function FormInput(props: InputHTMLAttributes<HTMLInputElement>) {
@@ -998,23 +1053,53 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
                 <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                   {dashboardData.active_refresh.summary || "Refresh pipeline is active."}
                 </p>
+                <div className="mt-3">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground/50">
+                      Pipeline Progress
+                    </p>
+                    <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-foreground/80">
+                      {refreshCompletionPercent(dashboardData)}%
+                    </p>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className="h-full bg-primary transition-all duration-500"
+                      style={{ width: `${refreshCompletionPercent(dashboardData)}%` }}
+                    />
+                  </div>
+                </div>
                 <div className="mt-3 space-y-2">
                   {REFRESH_PIPELINE_STEPS.map((step) => {
                     const job = dashboardData.refresh_jobs.find((item) => item.job_type === step.key)
-                    const tone =
-                      job?.status === "failed"
-                        ? "text-destructive/90"
-                        : job?.status === "succeeded"
-                          ? "text-primary"
-                          : job?.status === "running"
-                            ? "text-amber-300"
-                            : "text-muted-foreground"
                     return (
-                      <div key={step.key} className="flex items-center justify-between gap-3 rounded-sm border border-border/40 px-3 py-2">
-                        <p className="text-sm text-foreground">{step.label}</p>
-                        <p className={`font-mono text-[10px] uppercase tracking-[0.16em] ${tone}`}>
-                          {job ? `${job.status}${job.progress_total ? ` • ${jobProgressLabel(job)}` : ""}` : "waiting"}
-                        </p>
+                      <div key={step.key} className={`rounded-sm border px-3 py-2 ${refreshStageTone(job?.status || "waiting")}`}>
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm text-foreground">{step.label}</p>
+                          <p className="font-mono text-[10px] uppercase tracking-[0.16em]">
+                            {job ? `${job.status}${job.progress_total ? ` • ${jobProgressLabel(job)}` : ""}` : "waiting"}
+                          </p>
+                        </div>
+                        {job?.current_source ? (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Current source: {job.current_source}
+                          </p>
+                        ) : null}
+                        {job?.current_step ? (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Step: {job.current_step}
+                          </p>
+                        ) : null}
+                        {job?.error_summary ? (
+                          <p className="mt-2 rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-2 text-xs text-destructive/90">
+                            {job.error_summary}
+                          </p>
+                        ) : null}
+                        {job?.status === "succeeded" && Object.keys(job.output_snapshot || {}).length > 0 ? (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Output: {outputSnapshotSummary(job.output_snapshot)}
+                          </p>
+                        ) : null}
                       </div>
                     )
                   })}
@@ -1025,15 +1110,11 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
                       <div key={source} className="rounded-sm border border-border/40 px-3 py-2">
                         <div className="flex items-center justify-between gap-2">
                           <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-foreground/80">{source}</p>
-                          <span className={`font-mono text-[10px] uppercase tracking-[0.16em] ${statusTone(String(payload.status || "degraded") === "failed" || String(payload.status || "") === "unavailable" ? "degraded" : "ok")}`}>
+                          <span className={`font-mono text-[10px] uppercase tracking-[0.16em] ${sourceStatusTone(payload)}`}>
                             {String(payload.status || "unknown")}
                           </span>
                         </div>
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          {typeof payload.collected === "number"
-                            ? `Collected ${payload.collected} item${payload.collected === 1 ? "" : "s"}`
-                            : String(payload.error || "Waiting for source collection.")}
-                        </p>
+                        <p className="mt-2 text-xs text-muted-foreground">{sourceStatusDetail(payload)}</p>
                       </div>
                     ))}
                   </div>
@@ -1058,6 +1139,17 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
                     </div>
                   </div>
                 )}
+                <div className="mt-3 rounded-sm border border-border/40 bg-black/10 p-3">
+                  <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground/50">
+                    Full Flow
+                  </p>
+                  <div className="space-y-2 text-xs leading-relaxed text-muted-foreground">
+                    <p>1. Queue one refresh request with a fixed query snapshot from your profile topics, niche, audience, and formats.</p>
+                    <p>2. Run `collect_sources` first across web, Reddit, YouTube, and X. Each source reports collected count or an explicit failure.</p>
+                    <p>3. Only after collection succeeds or partially succeeds, the pipeline continues through creators, style, clustering, ranking, and ideas.</p>
+                    <p>4. Each stage writes progress, outputs, and errors back to Supabase, and the dashboard polls until the refresh finishes.</p>
+                  </div>
+                </div>
               </div>
             ) : null}
             {lastRun ? (

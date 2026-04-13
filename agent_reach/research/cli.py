@@ -541,11 +541,15 @@ def _update_refresh_request_after_job(store: ResearchStore, job_id: str) -> None
     siblings = store.list_jobs_for_refresh(job.refresh_request_id)
     statuses = {item.status for item in siblings}
     if JobStatus.PENDING in statuses or JobStatus.RUNNING in statuses:
+        source_status = refresh.source_status
+        if job.job_type == JobType.COLLECT_SOURCES and isinstance(job.output_snapshot, dict):
+            source_status = job.output_snapshot.get("source_status") or refresh.source_status
         store.update_refresh_request(
             refresh.id,
             status=RefreshRequestStatus.RUNNING,
             latest_stage=job.job_type.value,
             summary=f"{job.job_type.value} updated. Waiting for remaining jobs.",
+            source_status=source_status,
             started_at=refresh.started_at or datetime.now(timezone.utc),
         )
         return
@@ -558,11 +562,16 @@ def _update_refresh_request_after_job(store: ResearchStore, job_id: str) -> None
         final_status = RefreshRequestStatus.FAILED
     else:
         final_status = RefreshRequestStatus.SUCCEEDED
+    source_status = refresh.source_status
+    collect_job = next((item for item in siblings if item.job_type == JobType.COLLECT_SOURCES), None)
+    if collect_job and isinstance(collect_job.output_snapshot, dict):
+        source_status = collect_job.output_snapshot.get("source_status") or source_status
     store.update_refresh_request(
         refresh.id,
         status=final_status,
         latest_stage=job.job_type.value,
         summary=f"Refresh completed with {succeeded} succeeded and {failed} failed jobs.",
+        source_status=source_status,
         started_at=refresh.started_at or datetime.now(timezone.utc),
         finished_at=datetime.now(timezone.utc),
     )
