@@ -26,13 +26,13 @@ class LocalBlobStore:
     """Filesystem-backed blob store used for local development."""
 
     def __init__(self, root_dir: str | Path):
-        self.root_dir = Path(root_dir)
+        self.root_dir = Path(root_dir).resolve()
 
     def _path_for_key(self, key: str) -> Path:
         return self.root_dir / key
 
     def _key_for_path(self, path: Path) -> str:
-        return path.relative_to(self.root_dir).as_posix()
+        return path.resolve().relative_to(self.root_dir).as_posix()
 
     def put_bytes(self, key: str, content: bytes, content_type: str = "application/octet-stream") -> str:
         del content_type

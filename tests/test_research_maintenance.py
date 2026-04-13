@@ -65,11 +65,11 @@ def test_cleanup_artifacts_dry_run_and_delete_only_old_matching_kind(tmp_path):
     os.utime(raw_path, (old_timestamp, old_timestamp))
 
     dry_run = cleanup_artifacts(settings, kind="raw", older_than_days=30, dry_run=True)
-    deleted = cleanup_artifacts(settings, kind="raw", older_than_days=30, dry_run=False)
-
     assert dry_run["candidate_count"] == 1
     assert dry_run["deleted_count"] == 0
     assert raw_path.exists()
+
+    deleted = cleanup_artifacts(settings, kind="raw", older_than_days=30, dry_run=False)
 
     assert deleted["candidate_count"] == 1
     assert deleted["deleted_count"] == 1

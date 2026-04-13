@@ -81,7 +81,9 @@ def test_build_health_report_surfaces_worker_and_source_degradation(tmp_path):
         "last_result": None,
         "last_error": None,
     }
-    worker_status_path(settings).write_text(json.dumps(status_payload), encoding="utf-8")
+    status_path = worker_status_path(settings)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(status_payload), encoding="utf-8")
 
     report = build_health_report(
         settings=settings,
