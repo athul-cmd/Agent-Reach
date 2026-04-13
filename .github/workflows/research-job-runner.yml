@@ -1,0 +1,52 @@
+name: research-job-runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_run_id:
+        description: Job run ID to execute
+        required: true
+        type: string
+      job_type:
+        description: Job type label
+        required: false
+        type: string
+      profile_id:
+        description: Research profile ID
+        required: false
+        type: string
+      trigger:
+        description: Dispatch origin
+        required: false
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints.txt -e .[postgres,crypto]
+
+      - name: Execute claimed job
+        env:
+          AGENT_REACH_RESEARCH_DB_BACKEND: supabase
+          AGENT_REACH_RESEARCH_DB_DSN: ${{ secrets.AGENT_REACH_RESEARCH_DB_DSN }}
+          AGENT_REACH_RESEARCH_BLOB_BACKEND: supabase
+          AGENT_REACH_RESEARCH_BLOB_BUCKET: ${{ secrets.AGENT_REACH_RESEARCH_BLOB_BUCKET }}
+          AGENT_REACH_RESEARCH_BLOB_PREFIX: ${{ secrets.AGENT_REACH_RESEARCH_BLOB_PREFIX }}
+          AGENT_REACH_RESEARCH_SUPABASE_URL: ${{ secrets.AGENT_REACH_RESEARCH_SUPABASE_URL }}
+          AGENT_REACH_RESEARCH_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.AGENT_REACH_RESEARCH_SUPABASE_SERVICE_ROLE_KEY }}
+          AGENT_REACH_RESEARCH_SETTINGS_ENCRYPTION_KEY: ${{ secrets.AGENT_REACH_RESEARCH_SETTINGS_ENCRYPTION_KEY }}
+          AGENT_REACH_RESEARCH_SUPABASE_OWNER_USER_ID: ${{ secrets.AGENT_REACH_RESEARCH_SUPABASE_OWNER_USER_ID }}
+        run: |
+          agent-reach research run job --job-run-id "${{ inputs.job_run_id }}"

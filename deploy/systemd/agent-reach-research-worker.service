@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Reach Content Research Worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/agent-reach
+EnvironmentFile=/etc/agent-reach/research-worker.env
+ExecStart=/opt/agent-reach/.venv/bin/agent-reach research worker run
+Restart=always
+RestartSec=10
+User=agentreach
+Group=agentreach
+
+[Install]
+WantedBy=multi-user.target

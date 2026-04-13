@@ -14,6 +14,7 @@ Repo: github.com/Panniantong/Agent-Reach | License: MIT | Version: 1.3.0
 - `python -m agent_reach.cli install --env=auto` — Auto-configure
 
 ## Structure
+- `nodepad-main/` — Content Research Studio (Next.js). From repo root run `npm run dev` (root `package.json` delegates into `nodepad-main` so Turbopack resolves modules correctly).
 - `agent_reach/cli.py` — CLI entry point (argparse)
 - `agent_reach/core.py` — Core read/search routing logic
 - `agent_reach/config.py` — Config management (YAML, env vars)

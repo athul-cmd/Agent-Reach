@@ -47,6 +47,8 @@ def _configure_logging(verbose: bool = False):
 def main():
     _ensure_utf8_console()
 
+    from agent_reach.research.cli import handle_research_command, register_research_parser
+
     parser = argparse.ArgumentParser(
         prog="agent-reach",
         description="Give your AI Agent eyes to see the entire internet",
@@ -116,6 +118,9 @@ def main():
     # ── version ──
     sub.add_parser("version", help="Show version")
 
+    # ── research ──
+    register_research_parser(sub)
+
     args = parser.parse_args()
 
     # Suppress loguru noise unless --verbose
@@ -147,6 +152,8 @@ def main():
         _cmd_skill(args)
     elif args.command == "format":
         _cmd_format(args)
+    elif args.command == "research":
+        handle_research_command(args)
 
 
 # ── Command handlers ────────────────────────────────

@@ -1,0 +1,18 @@
+# v0 runtime files
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+
+# Design system (local only, not deployed)
+app/design-system/
+
+# Common ignores
+node_modules/
+.next/
+.env*.local
+.DS_Store
+.claude/
+tsconfig.tsbuildinfo
+
+# Internal docs
+CLAUDE.md

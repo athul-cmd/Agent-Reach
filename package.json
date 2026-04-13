@@ -1,0 +1,19 @@
+{
+  "name": "agent-reach-monorepo",
+  "private": true,
+  "description": "Anchor package so npm commands run from this repo, not $HOME. Use `cd nodepad-main && …` so Next runs with the correct cwd; see nodepad-main/next.config.mjs turbopack.resolveAlias if parent package.json breaks CSS resolution.",
+  "scripts": {
+    "dev:stack": "npx --yes concurrently -k -n api,web -c cyan,magenta \"./.venv/bin/agent-reach research serve\" \"sh -c 'cd nodepad-main && exec npm run dev'\"",
+    "dev:stack:webpack": "npx --yes concurrently -k -n api,web -c cyan,magenta \"./.venv/bin/agent-reach research serve\" \"sh -c 'cd nodepad-main && exec npm run dev:webpack'\"",
+    "dev:stack:full": "npx --yes concurrently -k -n api,worker,web -c cyan,yellow,magenta \"./.venv/bin/agent-reach research serve\" \"./.venv/bin/agent-reach research worker run\" \"sh -c 'cd nodepad-main && exec npm run dev'\"",
+    "dev": "cd nodepad-main && npm run dev",
+    "dev:webpack": "cd nodepad-main && npm run dev:webpack",
+    "build": "cd nodepad-main && npm run build",
+    "start": "cd nodepad-main && npm run start",
+    "lint": "cd nodepad-main && npm run lint",
+    "test:frontend": "cd nodepad-main && npm run test",
+    "test:python": "./.venv/bin/python -m pytest tests/test_research_store.py tests/test_research_cli.py tests/test_research_api.py tests/test_research_verification.py",
+    "test": "npm run test:frontend && npm run test:python",
+    "verify": "npm run lint && npm run test"
+  }
+}
