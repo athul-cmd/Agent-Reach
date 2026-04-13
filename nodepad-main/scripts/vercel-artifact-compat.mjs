@@ -1,4 +1,4 @@
-import { copyFile, mkdir, stat } from "node:fs/promises"
+import { copyFile, cp, mkdir, stat } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -27,12 +27,32 @@ async function mirrorBuildArtifact(sourceRelativePath, targetRelativePath = sour
   await copyFile(source, target)
 }
 
+async function mirrorBuildOutputDirectory() {
+  const sourceDir = resolve(appDir, ".next")
+  const targetDir = resolve(repoRoot, ".next")
+
+  if (!(await exists(sourceDir))) {
+    return
+  }
+
+  await cp(sourceDir, targetDir, {
+    recursive: true,
+    force: true,
+    // Keep deploy payload smaller; cache is not needed for Vercel post-processing.
+    filter: (src) => !src.includes("/.next/cache"),
+  })
+}
+
 async function main() {
   if (process.env.VERCEL !== "1") {
     return
   }
 
-  // Vercel monorepo builds may look for this manifest from repo root.
+  // Vercel monorepo post-processing may look for .next artifacts from repo root.
+  // Mirror app build output to root to satisfy those lookups.
+  await mirrorBuildOutputDirectory()
+
+  // Some adapters specifically read routes-manifest-deterministic.json.
   // Next.js webpack builds generate routes-manifest.json, so we map it.
   const deterministic = "routes-manifest-deterministic.json"
   const deterministicSource = resolve(appDir, ".next", deterministic)
