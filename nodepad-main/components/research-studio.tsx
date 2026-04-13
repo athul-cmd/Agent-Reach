@@ -440,14 +440,26 @@ export function ResearchStudio({ data }: { data: ResearchDashboardData }) {
     await runAction(job, async () => {
       const result = await runManualJob({ profile_id: activeProfileId, job }) as {
         queued?: number
+        running?: number
+        rescheduled?: number
         dispatch?: { dispatched?: number }
       }
       const queued = result.queued ?? 0
+      const running = result.running ?? 0
+      const rescheduled = result.rescheduled ?? 0
       const dispatched = result.dispatch?.dispatched ?? 0
+      const queuedSummary =
+        queued > 0
+          ? `Queued ${queued} job${queued === 1 ? "" : "s"}${rescheduled > 0 ? ` (${rescheduled} moved to run now)` : ""}.`
+          : running > 0
+            ? `${running} job${running === 1 ? "" : "s"} already running.`
+            : "No new jobs were added."
       const summary =
         dispatched > 0
-          ? `Queued ${queued} job${queued === 1 ? "" : "s"} and dispatched ${dispatched}.`
-          : `Queued ${queued} job${queued === 1 ? "" : "s"} for background execution.`
+          ? `${queuedSummary} Dispatched ${dispatched}.`
+          : queued > 0 || running > 0
+            ? `${queuedSummary} Waiting for background execution.`
+            : queuedSummary
       await refreshDashboard(summary)
     })
   }

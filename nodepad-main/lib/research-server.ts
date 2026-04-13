@@ -1068,7 +1068,8 @@ export async function queueManualRunServer(payload: { profile_id?: string; job: 
   const admin = createResearchAdminClient()
   const profile = await resolveProfile(admin, payload.profile_id)
   requireProfile(profile)
-  const now = nowIso()
+  const nowDate = new Date()
+  const now = nowDate.toISOString()
   const requestedTypes =
     payload.job === "all"
       ? [
@@ -1088,13 +1089,49 @@ export async function queueManualRunServer(payload: { profile_id?: string; job: 
   }
   const openJobsResult = await admin
     .from("job_runs")
-    .select("job_type, status")
+    .select("id, job_type, status, scheduled_for")
     .eq("research_profile_id", profile.id)
     .in("status", ["pending", "running"])
   if (openJobsResult.error) throw new Error(openJobsResult.error.message)
-  const openJobTypes = new Set((openJobsResult.data || []).map((job) => job.job_type as JobType))
+  const openJobs = (openJobsResult.data || []) as Array<{
+    id: string
+    job_type: JobType
+    status: JobStatus
+    scheduled_for: string
+  }>
+  const openJobsByType = new Map(openJobs.map((job) => [job.job_type, job]))
+  const immediateJobTypes = new Set<JobType>()
+  const rescheduledJobIds: string[] = []
+
+  for (const jobType of validJobTypes) {
+    const existing = openJobsByType.get(jobType)
+    if (!existing) continue
+    if (existing.status === "running") {
+      immediateJobTypes.add(jobType)
+      continue
+    }
+    if (Date.parse(existing.scheduled_for) <= nowDate.getTime()) {
+      immediateJobTypes.add(jobType)
+      continue
+    }
+    const { error: updateError } = await admin
+      .from("job_runs")
+      .update({
+        scheduled_for: now,
+        lease_token: "",
+        lease_owner: "",
+        lease_expires_at: null,
+        dispatched_at: null,
+      })
+      .eq("id", existing.id)
+      .eq("status", "pending")
+    if (updateError) throw new Error(updateError.message)
+    immediateJobTypes.add(jobType)
+    rescheduledJobIds.push(existing.id)
+  }
+
   const inserts = validJobTypes
-    .filter((job) => !openJobTypes.has(job))
+    .filter((job) => !openJobsByType.has(job))
     .map((jobType) => ({
       id: `job_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
       research_profile_id: profile.id,
@@ -1120,7 +1157,9 @@ export async function queueManualRunServer(payload: { profile_id?: string; job: 
   const dispatch = await dispatchDueJobsServer({ leaseOwner: "manual-run", trigger: "manual" })
   return {
     ok: true,
-    queued: inserts.length,
+    queued: inserts.length + rescheduledJobIds.length,
+    running: [...immediateJobTypes].length - (inserts.length + rescheduledJobIds.length),
+    rescheduled: rescheduledJobIds.length,
     dispatch,
   }
 }
