@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const appDir = resolve(__dirname, "..")
 const repoRoot = resolve(appDir, "..")
+const vercelRoot = "/vercel"
 
 async function exists(path) {
   try {
@@ -43,6 +44,17 @@ async function mirrorBuildOutputDirectory() {
   })
 }
 
+async function mirrorNodeModuleArtifact(sourceRelativePath, absoluteTargetPath) {
+  const source = resolve(appDir, "node_modules", sourceRelativePath)
+
+  if (!(await exists(source))) {
+    return
+  }
+
+  await mkdir(dirname(absoluteTargetPath), { recursive: true })
+  await copyFile(source, absoluteTargetPath)
+}
+
 async function main() {
   if (process.env.VERCEL !== "1") {
     return
@@ -59,10 +71,16 @@ async function main() {
 
   if (await exists(deterministicSource)) {
     await mirrorBuildArtifact(deterministic)
-    return
+  } else {
+    await mirrorBuildArtifact("routes-manifest.json", deterministic)
   }
 
-  await mirrorBuildArtifact("routes-manifest.json", deterministic)
+  // Vercel post-processing in monorepo builds can look for this Next adapter file
+  // under /vercel/node_modules even when the app is installed in a subdirectory.
+  await mirrorNodeModuleArtifact(
+    "next/dist/build/adapter/setup-node-env.external.js",
+    resolve(vercelRoot, "node_modules/next/dist/build/adapter/setup-node-env.external.js"),
+  )
 }
 
 await main()
