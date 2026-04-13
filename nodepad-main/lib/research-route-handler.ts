@@ -1,4 +1,4 @@
-import type { ResearchProfileInput } from "./research-api.ts"
+import type { ResearchProfileInput } from "./research-types.ts"
 
 export type ResearchRoutePayload = Record<string, unknown>
 

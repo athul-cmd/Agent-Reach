@@ -17,7 +17,7 @@ import type {
   VerificationSourceCheckPayload,
   WeeklyReportPayload,
   WorkerHealthPayload,
-} from "@/lib/research-api"
+} from "@/lib/research-types"
 import {
   buildGitHubDispatchRequest,
   DIRECT_RESEARCH_API_BASE_URL,

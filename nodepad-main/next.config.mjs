@@ -43,6 +43,7 @@ function contentSecurityPolicyValue() {
 }
 
 const nextConfig = {
+  outputFileTracingRoot: __dirname,
   // Pin Turbopack root when a parent directory has another package-lock.json (e.g. ~/package-lock.json).
   // resolveAlias: if the repo root has a package.json, CSS/PostCSS may resolve bare imports from that
   // directory (no node_modules there) and fail on tw-animate-css — map to this app's node_modules.
