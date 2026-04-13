@@ -28,6 +28,13 @@ The second file creates the app-side encrypted settings tables and RLS policies 
 
 Deploy `nodepad-main/` to Vercel.
 
+Important:
+
+1. In the Vercel project, set `Root Directory` to `nodepad-main`
+2. Set the framework preset to `Next.js`
+
+This cannot be fully forced from the repo root. Vercel still decides the project root from the project settings. Without `Root Directory=nodepad-main`, Vercel may inspect the repo root, see `pyproject.toml`, and try to build the repository as a Python app instead of the Next.js frontend.
+
 Set these environment variables in the Vercel project:
 
 ```bash

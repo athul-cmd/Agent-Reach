@@ -22,6 +22,8 @@ The frontend still reuses the Nodepad interaction model and shared spatial compo
 Use [docs/research-local-setup.md](../docs/research-local-setup.md) as the setup guide (from the repository root).
 Use [docs/research-deployment.md](../docs/research-deployment.md) for the hosted Vercel + Supabase + QStash + GitHub Actions deployment path.
 
+For Vercel, this app must be deployed with the project `Root Directory` set to `nodepad-main`.
+
 At minimum, local frontend development needs these env vars in `nodepad-main/.env.local`:
 
 ```bash
